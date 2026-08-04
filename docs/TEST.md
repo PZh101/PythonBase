@@ -32,6 +32,14 @@ pytest -v -s                    # -s = --capture=no，显示 print
 pytest -v --capture=no          # 等价写法
 ```
 
+## 多租户 RBAC 测试
+
+```bash
+uv run pytest tests/pkg/security tests/pkg/tenant tests/pkg/database/test_tenant_crud.py tests/app/iam -v
+```
+
+这些测试覆盖认证上下文、租户解析、权限依赖、租户感知 CRUD 和 IAM 上下文加载。
+
 ## 目录结构
 
 ```
