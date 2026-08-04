@@ -1,5 +1,6 @@
 """不可变的强类型配置模型。"""
 
+from collections.abc import Mapping
 from enum import StrEnum
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -15,7 +16,12 @@ class DatabaseType(StrEnum):
 class FrozenSettings(BaseModel):
     """禁止修改和额外字段的配置模型基类。"""
 
-    model_config = ConfigDict(frozen=True, extra="forbid", validate_default=True)
+    model_config = ConfigDict(
+        frozen=True,
+        extra="forbid",
+        validate_default=True,
+        hide_input_in_errors=True,
+    )
 
 
 class ProfileSettings(FrozenSettings):
@@ -36,9 +42,17 @@ class PoolSettings(FrozenSettings):
 
     size: int = Field(default=10, ge=1)
     max_overflow: int = Field(default=20, ge=0)
-    timeout: float = Field(default=30, gt=0)
+    timeout: float = Field(default=30, gt=0, allow_inf_nan=False)
     recycle: int = Field(default=1800, ge=0)
     pre_ping: bool = True
+
+    @field_validator("size", "max_overflow", "timeout", "recycle", mode="before")
+    @classmethod
+    def reject_boolean_numeric_values(cls, value: object) -> object:
+        """拒绝将布尔值隐式转换为连接池数值。"""
+        if isinstance(value, bool):
+            raise ValueError("不能是布尔值")
+        return value
 
 
 class DatabaseSettings(FrozenSettings):
@@ -46,14 +60,33 @@ class DatabaseSettings(FrozenSettings):
 
     type: DatabaseType = DatabaseType.MYSQL
     host: str = "127.0.0.1"
-    port: int | None = Field(default=None, ge=1, le=65535)
+    port: int = Field(default=3306, ge=1, le=65535)
     username: str = "root"
-    password: str = ""
+    password: str = Field(default="", repr=False)
     database: str = "pythonbase"
     echo: bool = False
-    connect_timeout: float = Field(default=10, gt=0)
+    connect_timeout: float = Field(default=10, gt=0, allow_inf_nan=False)
     startup_check: bool = True
     pool: PoolSettings = Field(default_factory=PoolSettings)
+
+    @model_validator(mode="before")
+    @classmethod
+    def resolve_default_port(cls, value: object) -> object:
+        """按原始数据库类型补全省略或为空的端口。"""
+        if not isinstance(value, Mapping):
+            return value
+
+        data = dict(value)
+        if data.get("port") is not None:
+            return data
+
+        raw_database_type = data.get("type", DatabaseType.MYSQL)
+        try:
+            database_type = DatabaseType(raw_database_type)
+        except (TypeError, ValueError):
+            database_type = DatabaseType.MYSQL
+        data["port"] = 5432 if database_type is DatabaseType.POSTGRESQL else 3306
+        return data
 
     @field_validator("host", "username", "database")
     @classmethod
@@ -73,13 +106,13 @@ class DatabaseSettings(FrozenSettings):
             raise ValueError("必须是标量")
         return str(value)
 
-    @model_validator(mode="after")
-    def resolve_default_port(self) -> "DatabaseSettings":
-        """按最终数据库类型补全未指定的端口。"""
-        if self.port is None:
-            port = 3306 if self.type is DatabaseType.MYSQL else 5432
-            object.__setattr__(self, "port", port)
-        return self
+    @field_validator("port", "connect_timeout", mode="before")
+    @classmethod
+    def reject_boolean_numeric_values(cls, value: object) -> object:
+        """拒绝将布尔值隐式转换为数据库数值。"""
+        if isinstance(value, bool):
+            raise ValueError("不能是布尔值")
+        return value
 
 
 class RuntimeSettings(FrozenSettings):

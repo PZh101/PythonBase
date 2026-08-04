@@ -100,6 +100,21 @@ def test_non_scalar_password_is_rejected() -> None:
         DatabaseSettings(password=["secret"])
 
 
+def test_password_is_hidden_from_model_repr() -> None:
+    """数据库配置 repr 不应暴露密码。"""
+    settings = DatabaseSettings(password="super-secret")
+
+    assert "super-secret" not in repr(settings)
+
+
+def test_password_input_is_hidden_from_validation_error() -> None:
+    """密码校验错误不应回显敏感输入。"""
+    with pytest.raises(ValidationError) as exc_info:
+        DatabaseSettings(password=["super-secret"])
+
+    assert "super-secret" not in str(exc_info.value)
+
+
 @pytest.mark.parametrize("field", ["host", "username", "database"])
 def test_required_connection_text_cannot_be_blank(field: str) -> None:
     """主机、用户名和数据库名不应接受空白文本。"""
@@ -112,6 +127,35 @@ def test_invalid_ports_are_rejected(port: int) -> None:
     """数据库端口必须位于 1 到 65535 范围内。"""
     with pytest.raises(ValidationError):
         DatabaseSettings(port=port)
+
+
+def test_database_port_field_is_non_nullable_integer() -> None:
+    """数据库端口字段的类型和 JSON Schema 都应为非空整数。"""
+    port_field = DatabaseSettings.model_fields["port"]
+    port_schema = DatabaseSettings.model_json_schema()["properties"]["port"]
+
+    assert port_field.annotation is int
+    assert port_schema["type"] == "integer"
+
+
+@pytest.mark.parametrize(
+    ("database_type", "port", "expected"),
+    [
+        (DatabaseType.MYSQL, None, 3306),
+        (DatabaseType.POSTGRESQL, None, 5432),
+        (DatabaseType.POSTGRESQL, 15432, 15432),
+    ],
+)
+def test_database_port_is_always_runtime_integer(
+    database_type: DatabaseType,
+    port: int | None,
+    expected: int,
+) -> None:
+    """省略、空值或显式端口最终都应解析为整数。"""
+    settings = DatabaseSettings(type=database_type, port=port)
+
+    assert type(settings.port) is int
+    assert settings.port == expected
 
 
 @pytest.mark.parametrize(
@@ -127,6 +171,63 @@ def test_invalid_pool_bounds_are_rejected(field: str, value: int) -> None:
     """连接池数值配置应遵守各自的下限。"""
     with pytest.raises(ValidationError):
         PoolSettings(**{field: value})
+
+
+@pytest.mark.parametrize(
+    ("settings_type", "field", "value"),
+    [
+        (PoolSettings, "size", True),
+        (PoolSettings, "max_overflow", False),
+        (PoolSettings, "timeout", True),
+        (PoolSettings, "recycle", False),
+        (DatabaseSettings, "port", True),
+        (DatabaseSettings, "connect_timeout", True),
+    ],
+)
+def test_numeric_fields_reject_boolean_values(
+    settings_type: type[FrozenSettings],
+    field: str,
+    value: bool,
+) -> None:
+    """数值配置字段不应将布尔值转换为数字。"""
+    with pytest.raises(ValidationError):
+        settings_type(**{field: value})
+
+
+@pytest.mark.parametrize(
+    ("settings_type", "field", "value"),
+    [
+        (PoolSettings, "timeout", float("inf")),
+        (PoolSettings, "timeout", float("nan")),
+        (PoolSettings, "timeout", "inf"),
+        (PoolSettings, "timeout", "nan"),
+        (DatabaseSettings, "connect_timeout", float("inf")),
+        (DatabaseSettings, "connect_timeout", float("nan")),
+        (DatabaseSettings, "connect_timeout", "inf"),
+        (DatabaseSettings, "connect_timeout", "nan"),
+    ],
+)
+def test_timeout_fields_reject_non_finite_values(
+    settings_type: type[FrozenSettings],
+    field: str,
+    value: float | str,
+) -> None:
+    """超时配置字段不应接受无穷大或非数值。"""
+    with pytest.raises(ValidationError):
+        settings_type(**{field: value})
+
+
+def test_numeric_fields_continue_to_parse_numeric_strings() -> None:
+    """数值配置字段应继续解析合法的数字字符串。"""
+    pool = PoolSettings(size="2", max_overflow="3", timeout="1.5", recycle="4")
+    settings = DatabaseSettings(port="3307", connect_timeout="2.5", pool=pool)
+
+    assert pool.size == 2
+    assert pool.max_overflow == 3
+    assert pool.timeout == 1.5
+    assert pool.recycle == 4
+    assert settings.port == 3307
+    assert settings.connect_timeout == 2.5
 
 
 def test_application_defaults_include_default_profile() -> None:
