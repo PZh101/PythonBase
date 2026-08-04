@@ -10,14 +10,20 @@ from yaml import YAMLError
 from pkg.config.exceptions import ConfigEnvironmentError
 
 
+def _is_reserved_profile(name: str, prefix: str) -> bool:
+    return name.startswith(prefix) and name[len(prefix) :].casefold() == "profile"
+
+
 def get_environment_profile(environ: Mapping[str, str] | None = None) -> str | None:
     """读取并规范化 APP_PROFILE 指定的活动 profile。"""
     source = os.environ if environ is None else environ
-    value = source.get("APP_PROFILE")
-    if value is None:
+    matches = [value for name, value in source.items() if _is_reserved_profile(name, "APP_")]
+    if len(matches) > 1:
+        raise ConfigEnvironmentError("环境变量 profile 冲突: APP_PROFILE")
+    if not matches:
         return None
 
-    profile = value.strip()
+    profile = matches[0].strip()
     return profile or None
 
 
@@ -30,7 +36,44 @@ def _parse_value(value: str) -> Any:
         return value
 
 
-def _insert_path(target: MutableMapping[str, Any], path: list[str], value: Any) -> None:
+def _collect_candidates(
+    source: Mapping[str, str],
+    prefix: str,
+    delimiter: str,
+) -> list[tuple[tuple[str, ...], str]]:
+    candidates: list[tuple[tuple[str, ...], str]] = []
+    for name, raw_value in source.items():
+        if not name.startswith(prefix) or _is_reserved_profile(name, prefix):
+            continue
+
+        key = name[len(prefix) :]
+        path = tuple(segment.lower() for segment in key.split(delimiter))
+        if not key or any(not segment for segment in path):
+            raise ConfigEnvironmentError(f"环境变量路径非法: {name}")
+        candidates.append((path, raw_value))
+    return candidates
+
+
+def _validate_candidate_paths(candidates: list[tuple[tuple[str, ...], str]]) -> None:
+    paths: set[tuple[str, ...]] = set()
+    conflicts: set[tuple[str, ...]] = set()
+    for path, _ in candidates:
+        if path in paths:
+            conflicts.add(path)
+        paths.add(path)
+
+    for path in paths:
+        for length in range(1, len(path)):
+            parent = path[:length]
+            if parent in paths:
+                conflicts.add(parent)
+
+    if conflicts:
+        canonical_path = ".".join(min(conflicts))
+        raise ConfigEnvironmentError(f"环境变量路径冲突: {canonical_path}")
+
+
+def _insert_path(target: MutableMapping[str, Any], path: tuple[str, ...], value: Any) -> None:
     current = target
     for segment in path[:-1]:
         if segment not in current:
@@ -41,8 +84,6 @@ def _insert_path(target: MutableMapping[str, Any], path: list[str], value: Any) 
         current = existing
 
     leaf = path[-1]
-    if leaf in current and (isinstance(current[leaf], Mapping) or isinstance(value, Mapping)):
-        raise ConfigEnvironmentError(f"环境变量路径冲突: {'.'.join(path)}")
     current[leaf] = value
 
 
@@ -57,15 +98,11 @@ def parse_environment(
         raise ConfigEnvironmentError("环境变量路径分隔符不能为空")
 
     source = os.environ if environ is None else environ
-    result: dict[str, Any] = {}
-    for name, raw_value in source.items():
-        if not name.startswith(prefix) or name == "APP_PROFILE":
-            continue
+    candidates = _collect_candidates(source, prefix, delimiter)
+    _validate_candidate_paths(candidates)
 
-        key = name[len(prefix) :]
-        path = [segment.lower() for segment in key.split(delimiter)]
-        if not key or any(not segment for segment in path):
-            raise ConfigEnvironmentError(f"环境变量路径非法: {name}")
+    result: dict[str, Any] = {}
+    for path, raw_value in sorted(candidates):
         _insert_path(result, path, _parse_value(raw_value))
 
     return result
