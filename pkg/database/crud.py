@@ -1,4 +1,4 @@
-"""通用异步 CRUD 基类。"""
+"""Generic async CRUD helpers."""
 
 from collections.abc import Sequence
 from typing import Any, Generic, Literal, TypeVar
@@ -14,7 +14,7 @@ PrimaryKeyType = TypeVar("PrimaryKeyType")
 
 
 class BaseCrud(Generic[ModelType, PrimaryKeyType]):
-    """由调用方管理事务边界的通用 CRUD 操作。"""
+    """Generic CRUD operations that rely on caller-managed transactions."""
 
     def __init__(self, model: type[ModelType]) -> None:
         self.model = model
@@ -23,14 +23,14 @@ class BaseCrud(Generic[ModelType, PrimaryKeyType]):
         self._pk_type = pk_column.type.python_type
 
     def _coerce_pk(self, id: Any):
-        """将输入主键转换为 ORM 模型定义的主键类型。"""
+        """Coerce the incoming primary key into the mapped column type."""
         try:
             return self._pk_type(id)
         except Exception as exc:
             raise ValueError(f"Invalid primary key type: {id}") from exc
 
     async def get(self, db: AsyncSession, id: Any) -> ModelType | None:
-        """按主键查询单条记录。"""
+        """Get one record by primary key."""
         id = self._coerce_pk(id)
         query = select(self.model).where(self._pk_eq(id))
         result = await db.execute(query)
@@ -41,7 +41,7 @@ class BaseCrud(Generic[ModelType, PrimaryKeyType]):
         db: AsyncSession,
         obj_in: ModelType | dict[str, Any] | PydanticBaseModel,
     ) -> ModelType:
-        """创建记录并刷新数据库生成值，不提交事务。"""
+        """Create a record and flush it without committing."""
         if isinstance(obj_in, dict):
             db_obj = self.model(**obj_in)
         elif isinstance(obj_in, PydanticBaseModel):
@@ -62,9 +62,9 @@ class BaseCrud(Generic[ModelType, PrimaryKeyType]):
         *,
         exclude_unset: bool = False,
     ) -> ModelType | None:
-        """按主键更新记录并刷新对象，不提交事务。"""
+        """Update one record by primary key and flush without committing."""
         db_obj = await self.get(db, id)
-        if db_obj is None:
+        if not db_obj:
             return None
 
         if isinstance(obj_update, PydanticBaseModel):
@@ -81,7 +81,7 @@ class BaseCrud(Generic[ModelType, PrimaryKeyType]):
         return db_obj
 
     async def delete_by_id(self, db: AsyncSession, id: Any) -> bool:
-        """按主键删除记录，不提交事务。"""
+        """Delete one record by primary key and flush without committing."""
         id = self._coerce_pk(id)
         del_query = sa_delete(self.model).where(self._pk_eq(id))
         result = await db.execute(del_query)
@@ -98,7 +98,7 @@ class BaseCrud(Generic[ModelType, PrimaryKeyType]):
         sort_field: str | None = None,
         sort_order: Literal["asc", "desc"] = "desc",
     ) -> tuple[Sequence[ModelType], int]:
-        """分页查询记录，支持过滤和排序。"""
+        """List one page of records with optional filters and sorting."""
         page = max(page, 1)
         size = min(max(size, 1), 200)
 
@@ -109,7 +109,12 @@ class BaseCrud(Generic[ModelType, PrimaryKeyType]):
         total = total_result.scalar() or 0
 
         order = self._build_order(sort_field, sort_order)
-        stmt = select(self.model).order_by(order).offset((page - 1) * size).limit(size)
+        stmt = (
+            select(self.model)
+            .order_by(order)
+            .offset((page - 1) * size)
+            .limit(size)
+        )
         if filters:
             stmt = stmt.where(and_(*filters))
         result = await db.execute(stmt)
@@ -126,7 +131,7 @@ class BaseCrud(Generic[ModelType, PrimaryKeyType]):
         sort_order: Literal["asc", "desc"] = "desc",
         limit: int | None = None,
     ) -> Sequence[ModelType]:
-        """查询全部记录，支持过滤、排序和数量上限。"""
+        """Get all records with optional filters, sorting, and limit."""
         order = self._build_order(sort_field, sort_order)
         stmt = select(self.model).order_by(order)
         if filters:
@@ -137,7 +142,7 @@ class BaseCrud(Generic[ModelType, PrimaryKeyType]):
         return result.scalars().all()
 
     async def count(self, db: AsyncSession, *, filters: list | None = None) -> int:
-        """统计记录数量，支持过滤条件。"""
+        """Count records with optional filters."""
         stmt = select(func.count()).select_from(self.model)
         if filters:
             stmt = stmt.where(and_(*filters))
@@ -145,7 +150,7 @@ class BaseCrud(Generic[ModelType, PrimaryKeyType]):
         return result.scalar() or 0
 
     def _pk_eq(self, id: Any):
-        """构造主键等值条件。"""
+        """Build the primary-key equality expression."""
         return getattr(self.model, self._pk_name) == id
 
     def _build_order(
@@ -153,9 +158,11 @@ class BaseCrud(Generic[ModelType, PrimaryKeyType]):
         sort_field: str | None,
         sort_order: Literal["asc", "desc"],
     ):
-        """构造 SQLAlchemy 排序表达式。"""
+        """Build a SQLAlchemy order expression from field and direction."""
         field_name = sort_field or self._pk_name
         column = getattr(self.model, field_name, None)
         if column is None:
-            raise ValueError(f"Model '{self.model.__name__}' has no field '{field_name}'")
+            raise ValueError(
+                f"Model '{self.model.__name__}' has no field '{field_name}'"
+            )
         return column.asc() if sort_order == "asc" else column.desc()
