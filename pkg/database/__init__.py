@@ -2,5 +2,6 @@
 
 from pkg.database.base import Base
 from pkg.database.crud import BaseCrud
+from pkg.database.tenant_crud import TenantAwareCrud
 
-__all__ = ["Base", "BaseCrud"]
+__all__ = ["Base", "BaseCrud", "TenantAwareCrud"]
