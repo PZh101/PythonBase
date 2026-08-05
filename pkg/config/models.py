@@ -37,6 +37,31 @@ class AppSettings(FrozenSettings):
     profile: ProfileSettings = Field(default_factory=ProfileSettings)
 
 
+class LoggingSettings(FrozenSettings):
+    """日志输出配置。"""
+
+    level: str = "INFO"
+    format: str = (
+        "<green>{time:YYYY-MM-DD HH:mm:ss.SSS}</green> | "
+        "<level>{level: <8}</level> | "
+        "<cyan>{extra[logger_name]}</cyan> | "
+        "<level>{message}</level>"
+    )
+    serialize: bool = False
+    enqueue: bool = False
+    backtrace: bool = False
+    diagnose: bool = False
+
+    @field_validator("level")
+    @classmethod
+    def normalize_level(cls, value: str) -> str:
+        """日志级别应为非空文本并统一为大写。"""
+        normalized = value.strip().upper()
+        if not normalized:
+            raise ValueError("不能为空")
+        return normalized
+
+
 class PoolSettings(FrozenSettings):
     """数据库连接池配置。"""
 
@@ -122,3 +147,4 @@ class RuntimeSettings(FrozenSettings):
 
     app: AppSettings = Field(default_factory=AppSettings)
     database: DatabaseSettings = Field(default_factory=DatabaseSettings)
+    logging: LoggingSettings = Field(default_factory=LoggingSettings)

@@ -8,8 +8,9 @@ from fastapi import FastAPI
 from app.system.routes import create_system_router
 from app.workspace.routes import create_workspace_router
 from pkg.common.exceptions import register_exception_handlers
+from pkg.common.logging import configure_logging, get_logger
 from pkg.config import RuntimeSettings
-from pkg.config.environment import get_environment_profile, parse_environment
+from pkg.config.loader import load_configuration
 from pkg.database import (
     AsyncDatabaseManager,
     create_db_session_dependency,
@@ -18,24 +19,16 @@ from pkg.database import (
 
 
 def load_runtime_settings() -> RuntimeSettings:
-    """从环境变量加载运行时配置。
+    """从配置文件和环境变量加载运行时配置。
 
     Returns:
         解析后的运行时配置。
 
     使用方式:
-        在应用启动前调用，读取 `APP_` 前缀环境变量并构造 `RuntimeSettings`。
+        在应用启动前调用，读取 `application.yml`、profile 配置和 `APP_` 环境变量。
     """
-    data = parse_environment()
-    profile = get_environment_profile()
-    if profile is not None:
-        app_data = data.setdefault("app", {})
-        if isinstance(app_data, dict):
-            profile_data = app_data.setdefault("profile", {})
-            if isinstance(profile_data, dict):
-                profile_data["active"] = profile
-
-    return RuntimeSettings.model_validate(data)
+    loaded = load_configuration(".")
+    return RuntimeSettings.model_validate(loaded.data)
 
 
 def register_routes(
@@ -73,17 +66,23 @@ def create_app(
         `main.py` 直接导入本函数创建应用；测试可传入自定义配置或数据库管理器。
     """
     runtime_settings = settings or load_runtime_settings()
+    configure_logging(runtime_settings.logging)
+    logger = get_logger(__name__)
     manager = database_manager or create_manager(runtime_settings.database)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
         """管理数据库连接池生命周期。"""
+        logger.info("正在初始化数据库连接池")
         await manager.initialize()
         app.state.database = manager
+        logger.info("数据库连接池初始化完成")
         try:
             yield
         finally:
+            logger.info("正在释放数据库连接池")
             await manager.dispose()
+            logger.info("数据库连接池已释放")
 
     app = FastAPI(title=runtime_settings.app.name, lifespan=lifespan)
     app.state.settings = runtime_settings

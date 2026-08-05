@@ -20,6 +20,7 @@ from pkg.config.models import (
     DatabaseSettings,
     DatabaseType,
     FrozenSettings,
+    LoggingSettings,
     PoolSettings,
     ProfileSettings,
     RuntimeSettings,
@@ -244,6 +245,20 @@ def test_runtime_settings_use_default_sections() -> None:
 
     assert settings.app == AppSettings()
     assert settings.database == DatabaseSettings()
+    assert settings.logging == LoggingSettings()
+
+
+def test_logging_level_is_normalized() -> None:
+    """日志级别应自动规范化为大写。"""
+    settings = LoggingSettings(level="debug")
+
+    assert settings.level == "DEBUG"
+
+
+def test_blank_logging_level_is_rejected() -> None:
+    """日志级别不应接受空白文本。"""
+    with pytest.raises(ValidationError):
+        LoggingSettings(level="   ")
 
 
 def test_runtime_settings_allow_extra_top_level_sections() -> None:

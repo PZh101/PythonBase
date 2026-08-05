@@ -14,15 +14,15 @@
     register_exception_handlers(app)
 """
 
-import logging
 from typing import Any
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from pkg.common.api import ApiResponse
+from pkg.common.logging import get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 # ──────────────────────────────────────────────

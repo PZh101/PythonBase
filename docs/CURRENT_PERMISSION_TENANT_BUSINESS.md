@@ -485,12 +485,13 @@ scripts/2026_08_04_enterprise_permission_schema.sql
 - 企业部门、用户、角色、菜单/API 权限关系。
 - 用户权限画像聚合。
 - 业务空间成员和临时授权。
+- `app.web.create_app()` 已统一注册 `app/system` 和 `app/workspace` 路由。
 - 对应 SQL 初始化脚本。
 
 当前尚未完整打通：
 
 - `app/system` 与 `app/iam` 是两套权限数据模型，当前尚未统一到同一个授权来源。
-- `app/system`、`app/workspace` 路由尚未在 `main.py` 注册。
+- `app/system`、`app/workspace` 路由尚未强制接入 `pkg/security` 统一鉴权依赖。
 - 企业角色 `data_scope` 尚未转换为实际业务查询过滤条件。
 - 临时授权尚未接入 `pkg/security` 统一权限依赖。
 - 空间成员角色尚未接入统一权限依赖。
@@ -500,8 +501,7 @@ scripts/2026_08_04_enterprise_permission_schema.sql
 
 ```text
 先明确 app/iam 与 app/system 的主授权模型
-  -> 注册 system/workspace 路由
-  -> 将接口接入 require_permission / require_tenant
+  -> 将 system/workspace 接口接入 require_permission / require_tenant
   -> 实现 data_scope 查询过滤器
   -> 将临时授权作为权限兜底策略接入
   -> 增加审计与缓存

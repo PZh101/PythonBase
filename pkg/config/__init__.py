@@ -17,10 +17,12 @@ from pkg.config.models import (
     DatabaseSettings,
     DatabaseType,
     FrozenSettings,
+    LoggingSettings,
     PoolSettings,
     ProfileSettings,
     RuntimeSettings,
 )
+from pkg.config.loader import LoadedConfiguration, deep_merge, load_configuration, load_yaml_file
 
 __all__ = [
     "AppSettings",
@@ -36,8 +38,13 @@ __all__ = [
     "DatabaseType",
     "FrozenSettings",
     "InvalidProfileError",
+    "LoggingSettings",
+    "LoadedConfiguration",
     "PoolSettings",
     "ProfileNotFoundError",
     "ProfileSettings",
     "RuntimeSettings",
+    "deep_merge",
+    "load_configuration",
+    "load_yaml_file",
 ]

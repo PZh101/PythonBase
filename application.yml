@@ -1,0 +1,38 @@
+# PythonBase 示例配置文件。
+#
+# 当前代码中的 app.web.load_runtime_settings() 仍然只读取 APP_ 环境变量。
+# 本文件用于说明 pkg.config 配置模型和后续 application.yml 加载器的目标结构。
+# 后续实现 pkg.config.loader 后，可复制为 application.yml 并按环境调整。
+
+app:
+  # FastAPI 应用标题，启动后会显示在 /docs。
+  name: pythonbase
+
+database:
+  # 支持 mysql、postgresql。
+  type: mysql
+  host: 127.0.0.1
+  port: 3306
+  username: root
+  # 示例值请按本机数据库实际密码修改；不要提交真实生产密码。
+  password: "123456"
+  database: pythonbase
+  echo: false
+  connect_timeout: 10
+  # true 时应用启动会立即执行 SELECT 1。
+  # 如果只是本地查看 /docs 且暂时没有数据库，可以在 dev profile 中设为 false。
+  startup_check: true
+  pool:
+    size: 10
+    max_overflow: 20
+    timeout: 30
+    recycle: 1800
+    pre_ping: true
+
+# RuntimeSettings 允许保留额外顶层配置段，业务模块可以在这里放自定义配置。
+features:
+  permission_cache_enabled: false
+  temp_auth_enabled: true
+  allowed_regions:
+    - cn-east
+    - cn-south

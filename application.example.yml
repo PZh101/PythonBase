@@ -1,0 +1,92 @@
+# PythonBase 示例配置文件。
+#
+# 本文件用于说明 pkg.config 配置模型和 application.yml 的目标结构。
+# 可复制为 application.yml 并按环境调整；APP_ 环境变量会作为最高优先级覆盖。
+
+app:
+  # FastAPI 应用标题，启动后会显示在 /docs。
+  name: pythonbase
+  profile:
+    # 可选值由 profiles 下的配置块或 application-<profile>.yml 决定。
+    active: dev
+
+database:
+  # 支持 mysql、postgresql。
+  type: mysql
+  host: 127.0.0.1
+  port: 3306
+  username: root
+  # 示例值请按本机数据库实际密码修改；不要提交真实生产密码。
+  password: "change-me"
+  database: pythonbase
+  echo: false
+  connect_timeout: 10
+  # true 时应用启动会立即执行 SELECT 1。
+  # 如果只是本地查看 /docs 且暂时没有数据库，可以在 dev profile 中设为 false。
+  startup_check: true
+  pool:
+    size: 10
+    max_overflow: 20
+    timeout: 30
+    recycle: 1800
+    pre_ping: true
+
+logging:
+  level: INFO
+  # serialize 为 true 时输出 JSON 日志，适合容器环境采集。
+  serialize: false
+  enqueue: false
+  backtrace: false
+  diagnose: false
+
+# RuntimeSettings 允许保留额外顶层配置段，业务模块可以在这里放自定义配置。
+features:
+  permission_cache_enabled: false
+  temp_auth_enabled: true
+  allowed_regions:
+    - cn-east
+    - cn-south
+
+# 内联 profile 配置块。
+# 加载器设计中的优先级为：
+# 模型默认值 < application.yml 公共配置 < profiles.<active> < application-<active>.yml < APP_ 环境变量。
+profiles:
+  dev:
+    database:
+      echo: true
+      startup_check: false
+      pool:
+        size: 5
+        max_overflow: 5
+
+  mysql:
+    database:
+      type: mysql
+      host: 127.0.0.1
+      port: 3306
+      username: root
+      password: "change-me"
+      database: pythonbase
+
+  postgresql:
+    database:
+      type: postgresql
+      host: 127.0.0.1
+      port: 5432
+      username: postgres
+      password: "change-me"
+      database: pythonbase
+
+  prod:
+    app:
+      profile:
+        active: prod
+    database:
+      echo: false
+      startup_check: true
+      pool:
+        size: 30
+        max_overflow: 40
+        timeout: 30
+        recycle: 1800
+        pre_ping: true
