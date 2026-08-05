@@ -1,6 +1,6 @@
 """Async SQLAlchemy engine and session lifecycle management."""
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from importlib.util import find_spec
 
@@ -110,7 +110,7 @@ class AsyncDatabaseManager:
             await engine.dispose()
 
     @asynccontextmanager
-    async def session(self) -> AsyncIterator[AsyncSession]:
+    async def session(self) -> AsyncGenerator[AsyncSession]:
         """Yield a Session without automatically committing."""
         session = self._create_session()
         try:
@@ -122,7 +122,7 @@ class AsyncDatabaseManager:
             await session.close()
 
     @asynccontextmanager
-    async def transaction(self) -> AsyncIterator[AsyncSession]:
+    async def transaction(self) -> AsyncGenerator[AsyncSession]:
         """Yield a Session inside a transaction boundary."""
         session = self._create_session()
         try:
