@@ -16,13 +16,13 @@ def create_auth_context_dependency(provider: AuthContextProvider) -> Callable[..
 
     async def get_auth_context(
         request: Request,
-        user_id: Annotated[int | None, Header(alias="X-User-Id")] = None,
-        tenant_id: Annotated[int | None, Header(alias="X-Tenant-Id")] = None,
+        auth_user_id: Annotated[int | None, Header(alias="X-User-Id")] = None,
+        auth_tenant_id: Annotated[int | None, Header(alias="X-Tenant-Id")] = None,
     ) -> AuthContext:
         """从请求头读取用户和租户，并加载认证上下文。"""
-        if user_id is None:
+        if auth_user_id is None:
             raise AuthenticationRequiredException()
-        context = await provider.load_context(user_id=user_id, tenant_id=tenant_id)
+        context = await provider.load_context(user_id=auth_user_id, tenant_id=auth_tenant_id)
         request.state.auth_context = context
         return context
 

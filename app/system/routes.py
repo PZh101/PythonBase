@@ -25,6 +25,7 @@ from app.system.schemas import (
 )
 from app.system.service import SystemService
 from pkg.common.api import ApiResponse
+from pkg.security import require_permission, require_tenant
 
 
 def _to_schema(schema_type, value):
@@ -37,23 +38,35 @@ def _to_schema_list(schema_type, values):
     return [_to_schema(schema_type, value) for value in values]
 
 
-def create_system_router(db_dependency: Callable[..., object]) -> APIRouter:
+def create_system_router(
+    db_dependency: Callable[..., object],
+    auth_dependency: Callable[..., object],
+) -> APIRouter:
     """创建企业组织与权限路由。
 
     Args:
-        db_dependency: 返回 `AsyncSession` 的 FastAPI 依赖。
+        db_dependency: 返回 ``AsyncSession`` 的 FastAPI 依赖。
+        auth_dependency: 返回 ``AuthContext`` 的 FastAPI 认证依赖。
 
     Returns:
-        已绑定数据库依赖的 `APIRouter`。
+        已绑定数据库和认证依赖的 ``APIRouter``。
     """
 
-    router = APIRouter(prefix="/system", tags=["企业组织与权限"])
+    router = APIRouter(
+        prefix="/system",
+        tags=["企业组织与权限"],
+        dependencies=[Depends(auth_dependency)],
+    )
 
     def get_service(db: Annotated[AsyncSession, Depends(db_dependency)]) -> SystemService:
         """构造系统服务。"""
         return SystemService(SystemRepository(db))
 
-    @router.post("/departments", response_model=ApiResponse[DeptResponse])
+    @router.post(
+        "/departments",
+        response_model=ApiResponse[DeptResponse],
+        dependencies=[Depends(require_tenant()), Depends(require_permission("dept:create"))],
+    )
     async def create_dept(
         body: DeptCreateRequest,
         service: Annotated[SystemService, Depends(get_service)],
@@ -61,12 +74,22 @@ def create_system_router(db_dependency: Callable[..., object]) -> APIRouter:
         """创建部门。"""
         return ApiResponse(data=_to_schema(DeptResponse, await service.create_dept(body)))
 
-    @router.get("/departments", response_model=ApiResponse[list[DeptResponse]])
-    async def list_depts(service: Annotated[SystemService, Depends(get_service)]) -> ApiResponse[list[DeptResponse]]:
+    @router.get(
+        "/departments",
+        response_model=ApiResponse[list[DeptResponse]],
+        dependencies=[Depends(require_tenant()), Depends(require_permission("dept:read"))],
+    )
+    async def list_depts(
+        service: Annotated[SystemService, Depends(get_service)],
+    ) -> ApiResponse[list[DeptResponse]]:
         """查询部门列表。"""
         return ApiResponse(data=_to_schema_list(DeptResponse, await service.list_depts()))
 
-    @router.post("/users", response_model=ApiResponse[UserResponse])
+    @router.post(
+        "/users",
+        response_model=ApiResponse[UserResponse],
+        dependencies=[Depends(require_tenant()), Depends(require_permission("user:create"))],
+    )
     async def create_user(
         body: UserCreateRequest,
         service: Annotated[SystemService, Depends(get_service)],
@@ -74,12 +97,22 @@ def create_system_router(db_dependency: Callable[..., object]) -> APIRouter:
         """创建用户。"""
         return ApiResponse(data=_to_schema(UserResponse, await service.create_user(body)))
 
-    @router.get("/users", response_model=ApiResponse[list[UserResponse]])
-    async def list_users(service: Annotated[SystemService, Depends(get_service)]) -> ApiResponse[list[UserResponse]]:
+    @router.get(
+        "/users",
+        response_model=ApiResponse[list[UserResponse]],
+        dependencies=[Depends(require_tenant()), Depends(require_permission("user:read"))],
+    )
+    async def list_users(
+        service: Annotated[SystemService, Depends(get_service)],
+    ) -> ApiResponse[list[UserResponse]]:
         """查询用户列表。"""
         return ApiResponse(data=_to_schema_list(UserResponse, await service.list_users()))
 
-    @router.post("/users/{user_id}/departments", response_model=ApiResponse[RelationResponse])
+    @router.post(
+        "/users/{user_id}/departments",
+        response_model=ApiResponse[RelationResponse],
+        dependencies=[Depends(require_tenant()), Depends(require_permission("user:update"))],
+    )
     async def assign_user_dept(
         user_id: int,
         body: UserDeptAssignRequest,
@@ -89,7 +122,11 @@ def create_system_router(db_dependency: Callable[..., object]) -> APIRouter:
         relation = await service.assign_user_dept(user_id=user_id, dept_id=body.dept_id, is_primary=body.is_primary)
         return ApiResponse(data=_to_schema(RelationResponse, relation))
 
-    @router.post("/roles", response_model=ApiResponse[RoleResponse])
+    @router.post(
+        "/roles",
+        response_model=ApiResponse[RoleResponse],
+        dependencies=[Depends(require_tenant()), Depends(require_permission("role:create"))],
+    )
     async def create_role(
         body: RoleCreateRequest,
         service: Annotated[SystemService, Depends(get_service)],
@@ -97,12 +134,22 @@ def create_system_router(db_dependency: Callable[..., object]) -> APIRouter:
         """创建角色。"""
         return ApiResponse(data=_to_schema(RoleResponse, await service.create_role(body)))
 
-    @router.get("/roles", response_model=ApiResponse[list[RoleResponse]])
-    async def list_roles(service: Annotated[SystemService, Depends(get_service)]) -> ApiResponse[list[RoleResponse]]:
+    @router.get(
+        "/roles",
+        response_model=ApiResponse[list[RoleResponse]],
+        dependencies=[Depends(require_tenant()), Depends(require_permission("role:read"))],
+    )
+    async def list_roles(
+        service: Annotated[SystemService, Depends(get_service)],
+    ) -> ApiResponse[list[RoleResponse]]:
         """查询角色列表。"""
         return ApiResponse(data=_to_schema_list(RoleResponse, await service.list_roles()))
 
-    @router.post("/menus", response_model=ApiResponse[MenuResponse])
+    @router.post(
+        "/menus",
+        response_model=ApiResponse[MenuResponse],
+        dependencies=[Depends(require_tenant()), Depends(require_permission("menu:create"))],
+    )
     async def create_menu(
         body: MenuCreateRequest,
         service: Annotated[SystemService, Depends(get_service)],
@@ -110,12 +157,22 @@ def create_system_router(db_dependency: Callable[..., object]) -> APIRouter:
         """创建菜单或资源。"""
         return ApiResponse(data=_to_schema(MenuResponse, await service.create_menu(body)))
 
-    @router.get("/menus", response_model=ApiResponse[list[MenuResponse]])
-    async def list_menus(service: Annotated[SystemService, Depends(get_service)]) -> ApiResponse[list[MenuResponse]]:
+    @router.get(
+        "/menus",
+        response_model=ApiResponse[list[MenuResponse]],
+        dependencies=[Depends(require_tenant()), Depends(require_permission("menu:read"))],
+    )
+    async def list_menus(
+        service: Annotated[SystemService, Depends(get_service)],
+    ) -> ApiResponse[list[MenuResponse]]:
         """查询菜单或资源列表。"""
         return ApiResponse(data=_to_schema_list(MenuResponse, await service.list_menus()))
 
-    @router.post("/roles/{role_id}/menus", response_model=ApiResponse[RelationResponse])
+    @router.post(
+        "/roles/{role_id}/menus",
+        response_model=ApiResponse[RelationResponse],
+        dependencies=[Depends(require_tenant()), Depends(require_permission("role:update"))],
+    )
     async def assign_role_menu(
         role_id: int,
         body: RoleMenuAssignRequest,
@@ -125,7 +182,11 @@ def create_system_router(db_dependency: Callable[..., object]) -> APIRouter:
         relation = await service.assign_role_menu(role_id=role_id, menu_id=body.menu_id)
         return ApiResponse(data=_to_schema(RelationResponse, relation))
 
-    @router.post("/users/{user_id}/roles", response_model=ApiResponse[RelationResponse])
+    @router.post(
+        "/users/{user_id}/roles",
+        response_model=ApiResponse[RelationResponse],
+        dependencies=[Depends(require_tenant()), Depends(require_permission("user:update"))],
+    )
     async def assign_user_role(
         user_id: int,
         body: UserRoleAssignRequest,
@@ -135,7 +196,11 @@ def create_system_router(db_dependency: Callable[..., object]) -> APIRouter:
         relation = await service.assign_user_role(user_id=user_id, role_id=body.role_id)
         return ApiResponse(data=_to_schema(RelationResponse, relation))
 
-    @router.post("/roles/{role_id}/departments", response_model=ApiResponse[RelationResponse])
+    @router.post(
+        "/roles/{role_id}/departments",
+        response_model=ApiResponse[RelationResponse],
+        dependencies=[Depends(require_tenant()), Depends(require_permission("role:update"))],
+    )
     async def assign_role_dept(
         role_id: int,
         body: RoleDeptAssignRequest,
@@ -145,7 +210,11 @@ def create_system_router(db_dependency: Callable[..., object]) -> APIRouter:
         relation = await service.assign_role_dept(role_id=role_id, dept_id=body.dept_id)
         return ApiResponse(data=_to_schema(RelationResponse, relation))
 
-    @router.get("/users/{user_id}/access-profile", response_model=ApiResponse[UserAccessProfileResponse])
+    @router.get(
+        "/users/{user_id}/access-profile",
+        response_model=ApiResponse[UserAccessProfileResponse],
+        dependencies=[Depends(require_tenant()), Depends(require_permission("user:read"))],
+    )
     async def get_user_access_profile(
         user_id: int,
         service: Annotated[SystemService, Depends(get_service)],

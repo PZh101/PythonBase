@@ -63,3 +63,43 @@ def test_permission_dependency_rejects_missing_permission() -> None:
 
     assert response.status_code == 403
     assert response.json()["msg"] == "权限不足"
+
+
+def test_auth_dependency_header_user_id_does_not_conflict_with_path_user_id() -> None:
+    """认证头用户 ID 不应与路由路径 user_id 参数冲突。"""
+    app = FastAPI()
+    register_exception_handlers(app)
+    auth_dependency = create_auth_context_dependency(FakeAuthProvider())
+
+    @app.get(
+        "/users/{user_id}",
+        dependencies=[Depends(auth_dependency), Depends(require_permission("user:create"))],
+    )
+    async def read_user(user_id: int):
+        return {"path_user_id": user_id}
+
+    client = TestClient(app)
+    response = client.get("/users/2", headers={"X-User-Id": "1", "X-Tenant-Id": "10"})
+
+    assert response.status_code == 200
+    assert response.json() == {"path_user_id": 2}
+
+
+def test_auth_dependency_header_tenant_id_does_not_conflict_with_path_tenant_id() -> None:
+    """认证头租户 ID 不应与路由路径 tenant_id 参数冲突。"""
+    app = FastAPI()
+    register_exception_handlers(app)
+    auth_dependency = create_auth_context_dependency(FakeAuthProvider())
+
+    @app.get(
+        "/tenants/{tenant_id}/members",
+        dependencies=[Depends(auth_dependency), Depends(require_permission("user:create"))],
+    )
+    async def read_tenant_members(tenant_id: int):
+        return {"path_tenant_id": tenant_id}
+
+    client = TestClient(app)
+    response = client.get("/tenants/20/members", headers={"X-User-Id": "1", "X-Tenant-Id": "10"})
+
+    assert response.status_code == 200
+    assert response.json() == {"path_tenant_id": 20}

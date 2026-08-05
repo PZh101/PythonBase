@@ -3,6 +3,7 @@
 from pkg.security.context import AuthContext, PermissionSet, Principal
 from pkg.security.dependencies import (
     create_auth_context_dependency,
+    get_current_auth_context,
     require_any_permission,
     require_permission,
     require_role,
@@ -33,6 +34,7 @@ __all__ = [
     "ensure_permission",
     "ensure_role",
     "ensure_tenant",
+    "get_current_auth_context",
     "require_any_permission",
     "require_permission",
     "require_role",

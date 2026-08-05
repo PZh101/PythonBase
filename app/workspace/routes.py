@@ -18,6 +18,7 @@ from app.workspace.schemas import (
 )
 from app.workspace.service import WorkspaceService
 from pkg.common.api import ApiResponse
+from pkg.security import require_permission
 
 
 def _to_schema(schema_type, value):
@@ -30,23 +31,35 @@ def _to_schema_list(schema_type, values):
     return [_to_schema(schema_type, value) for value in values]
 
 
-def create_workspace_router(db_dependency: Callable[..., object]) -> APIRouter:
+def create_workspace_router(
+    db_dependency: Callable[..., object],
+    auth_dependency: Callable[..., object],
+) -> APIRouter:
     """创建业务空间与临时授权路由。
 
     Args:
-        db_dependency: 返回 `AsyncSession` 的 FastAPI 依赖。
+        db_dependency: 返回 ``AsyncSession`` 的 FastAPI 依赖。
+        auth_dependency: 返回 ``AuthContext`` 的 FastAPI 认证依赖。
 
     Returns:
-        已绑定数据库依赖的 `APIRouter`。
+        已绑定数据库和认证依赖的 ``APIRouter``。
     """
 
-    router = APIRouter(prefix="/workspaces", tags=["业务空间与临时授权"])
+    router = APIRouter(
+        prefix="/workspaces",
+        tags=["业务空间与临时授权"],
+        dependencies=[Depends(auth_dependency)],
+    )
 
     def get_service(db: Annotated[AsyncSession, Depends(db_dependency)]) -> WorkspaceService:
         """构造业务空间服务。"""
         return WorkspaceService(WorkspaceRepository(db))
 
-    @router.post("", response_model=ApiResponse[WorkspaceResponse])
+    @router.post(
+        "",
+        response_model=ApiResponse[WorkspaceResponse],
+        dependencies=[Depends(require_permission("workspace:create"))],
+    )
     async def create_workspace(
         body: WorkspaceCreateRequest,
         service: Annotated[WorkspaceService, Depends(get_service)],
@@ -54,14 +67,22 @@ def create_workspace_router(db_dependency: Callable[..., object]) -> APIRouter:
         """创建业务空间。"""
         return ApiResponse(data=_to_schema(WorkspaceResponse, await service.create_workspace(body)))
 
-    @router.get("", response_model=ApiResponse[list[WorkspaceResponse]])
+    @router.get(
+        "",
+        response_model=ApiResponse[list[WorkspaceResponse]],
+        dependencies=[Depends(require_permission("workspace:read"))],
+    )
     async def list_workspaces(
         service: Annotated[WorkspaceService, Depends(get_service)],
     ) -> ApiResponse[list[WorkspaceResponse]]:
         """查询业务空间列表。"""
         return ApiResponse(data=_to_schema_list(WorkspaceResponse, await service.list_workspaces()))
 
-    @router.post("/{workspace_id}/members", response_model=ApiResponse[WorkspaceMemberResponse])
+    @router.post(
+        "/{workspace_id}/members",
+        response_model=ApiResponse[WorkspaceMemberResponse],
+        dependencies=[Depends(require_permission("workspace:member:add"))],
+    )
     async def add_member(
         workspace_id: int,
         body: WorkspaceMemberAddRequest,
@@ -71,7 +92,11 @@ def create_workspace_router(db_dependency: Callable[..., object]) -> APIRouter:
         member = await service.add_member(workspace_id=workspace_id, user_id=body.user_id, role=body.role)
         return ApiResponse(data=_to_schema(WorkspaceMemberResponse, member))
 
-    @router.get("/{workspace_id}/members", response_model=ApiResponse[list[WorkspaceMemberResponse]])
+    @router.get(
+        "/{workspace_id}/members",
+        response_model=ApiResponse[list[WorkspaceMemberResponse]],
+        dependencies=[Depends(require_permission("workspace:member:read"))],
+    )
     async def list_members(
         workspace_id: int,
         service: Annotated[WorkspaceService, Depends(get_service)],
@@ -79,7 +104,11 @@ def create_workspace_router(db_dependency: Callable[..., object]) -> APIRouter:
         """查询业务空间成员列表。"""
         return ApiResponse(data=_to_schema_list(WorkspaceMemberResponse, await service.list_members(workspace_id)))
 
-    @router.post("/temp-auth", response_model=ApiResponse[TempAuthResponse])
+    @router.post(
+        "/temp-auth",
+        response_model=ApiResponse[TempAuthResponse],
+        dependencies=[Depends(require_permission("workspace:temp-auth:grant"))],
+    )
     async def grant_temp_auth(
         body: TempAuthGrantRequest,
         service: Annotated[WorkspaceService, Depends(get_service)],
