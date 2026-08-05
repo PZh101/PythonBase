@@ -3,7 +3,83 @@
 -- 不包含知识库相关表：kb_space、kb_document、kb_space_acl、kb_doc_acl。
 
 SET NAMES utf8mb4;
+SET UNIQUE_CHECKS = 0;
 SET FOREIGN_KEY_CHECKS = 0;
+
+CREATE TABLE IF NOT EXISTS `iam_users` (
+  `id` BIGINT NOT NULL COMMENT '主键ID',
+  `username` VARCHAR(64) NOT NULL COMMENT '登录账号',
+  `display_name` VARCHAR(128) DEFAULT NULL COMMENT '显示名称',
+  `is_platform_admin` TINYINT(1) NOT NULL DEFAULT 0 COMMENT '是否平台管理员：1-是，0-否',
+  `is_active` TINYINT(1) NOT NULL DEFAULT 1 COMMENT '是否启用：1-启用，0-停用',
+  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uk_iam_users_username` (`username`),
+  KEY `idx_iam_users_username` (`username`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='IAM 平台用户表';
+
+CREATE TABLE IF NOT EXISTS `iam_tenants` (
+  `id` BIGINT NOT NULL COMMENT '主键ID',
+  `code` VARCHAR(64) NOT NULL COMMENT '租户编码',
+  `name` VARCHAR(128) NOT NULL COMMENT '租户名称',
+  `status` VARCHAR(32) NOT NULL DEFAULT 'active' COMMENT '租户状态：active-启用',
+  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uk_iam_tenants_code` (`code`),
+  KEY `idx_iam_tenants_code` (`code`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='IAM 租户表';
+
+CREATE TABLE IF NOT EXISTS `iam_tenant_members` (
+  `id` BIGINT NOT NULL COMMENT '主键ID',
+  `tenant_id` BIGINT NOT NULL COMMENT '租户ID',
+  `user_id` BIGINT NOT NULL COMMENT '用户ID',
+  `status` VARCHAR(32) NOT NULL DEFAULT 'active' COMMENT '成员状态：active-有效',
+  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uq_iam_member_tenant_user` (`tenant_id`, `user_id`),
+  KEY `idx_iam_tenant_members_tenant_id` (`tenant_id`),
+  KEY `idx_iam_tenant_members_user_id` (`user_id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='IAM 租户成员表';
+
+CREATE TABLE IF NOT EXISTS `iam_roles` (
+  `id` BIGINT NOT NULL COMMENT '主键ID',
+  `tenant_id` BIGINT NOT NULL COMMENT '租户ID',
+  `code` VARCHAR(64) NOT NULL COMMENT '角色编码',
+  `name` VARCHAR(128) NOT NULL COMMENT '角色名称',
+  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uq_iam_role_tenant_code` (`tenant_id`, `code`),
+  KEY `idx_iam_roles_tenant_id` (`tenant_id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='IAM 租户角色表';
+
+CREATE TABLE IF NOT EXISTS `iam_permissions` (
+  `id` BIGINT NOT NULL COMMENT '主键ID',
+  `code` VARCHAR(128) NOT NULL COMMENT '权限编码',
+  `name` VARCHAR(128) NOT NULL COMMENT '权限名称',
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uk_iam_permissions_code` (`code`),
+  KEY `idx_iam_permissions_code` (`code`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='IAM 权限定义表';
+
+CREATE TABLE IF NOT EXISTS `iam_tenant_member_roles` (
+  `id` BIGINT NOT NULL COMMENT '主键ID',
+  `member_id` BIGINT NOT NULL COMMENT '租户成员ID',
+  `role_id` BIGINT NOT NULL COMMENT '角色ID',
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uq_iam_member_role` (`member_id`, `role_id`),
+  KEY `idx_iam_tenant_member_roles_member_id` (`member_id`),
+  KEY `idx_iam_tenant_member_roles_role_id` (`role_id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='IAM 成员角色关联表';
+
+CREATE TABLE IF NOT EXISTS `iam_role_permissions` (
+  `id` BIGINT NOT NULL COMMENT '主键ID',
+  `role_id` BIGINT NOT NULL COMMENT '角色ID',
+  `permission_id` BIGINT NOT NULL COMMENT '权限ID',
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uq_iam_role_permission` (`role_id`, `permission_id`),
+  KEY `idx_iam_role_permissions_role_id` (`role_id`),
+  KEY `idx_iam_role_permissions_permission_id` (`permission_id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='IAM 角色权限关联表';
 
 CREATE TABLE IF NOT EXISTS `sys_dept` (
   `id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT '主键ID',
@@ -136,3 +212,4 @@ CREATE TABLE IF NOT EXISTS `sys_workspace_member` (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='空间成员表';
 
 SET FOREIGN_KEY_CHECKS = 1;
+SET UNIQUE_CHECKS = 1;
