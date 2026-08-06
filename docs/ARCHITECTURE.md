@@ -22,7 +22,7 @@ flowchart TB
     Web["app.web.create_app()<br/>应用工厂"]
 
     subgraph App["app/ 应用业务层"]
-        IAM["app/iam<br/>租户 IAM 与 AuthContext 加载"]
+        IAM["app/iam<br/>租户 IAM、AuthContext 加载、租户管理 API"]
         System["app/system<br/>企业组织、角色、菜单/API 权限"]
         Workspace["app/workspace<br/>业务空间、空间成员、临时授权"]
     end
@@ -49,6 +49,7 @@ flowchart TB
     Web --> Logging
     Web --> Database
     Web --> Common
+    Web --> IAM
     Web --> System
     Web --> Workspace
     IAM --> Security
@@ -56,8 +57,10 @@ flowchart TB
     IAM --> Database
     System --> Common
     System --> Database
+    System --> Security
     Workspace --> Common
     Workspace --> Database
+    Workspace --> Security
     Security --> Tenant
     Database --> DB
     Scripts -. 初始化表结构 .-> DB
@@ -303,7 +306,7 @@ require_role()
   -> 从 request.state.auth_context 读取并校验
 ```
 
-框架层只依赖 `AuthContextProvider` 协议，不直接依赖具体 IAM 表结构。当前 `app/iam` 提供基于租户成员、角色和权限关系的上下文加载示例。
+框架层只依赖 `AuthContextProvider` 协议，不直接依赖具体 IAM 表结构。当前 `app/iam` 提供基于租户成员、角色和权限关系的上下文加载实现，`app.web.create_auth_dependency()` 将其接入 FastAPI 认证依赖。
 
 ## 企业组织权限模块
 
@@ -495,7 +498,7 @@ permission 相等
 start_time <= 当前时间 <= end_time
 ```
 
-当前临时授权作为独立业务能力存在，尚未接入 `pkg/security` 作为统一权限依赖的兜底策略。
+当前临时授权授予接口已接入权限码依赖（`workspace:temp-auth:grant`），校验接口仍为独立业务能力，尚未作为统一权限依赖的兜底策略。
 
 ## 模块协作关系
 
@@ -515,15 +518,11 @@ flowchart TB
     end
 
     API["业务 API"]
-    Future["后续统一授权来源<br/>映射到 AuthContext"]
 
     IAM --> Security
     Tenant --> Security
     System --> API
     Workspace --> API
-    System -. 可演进 .-> Future
-    Workspace -. 可演进 .-> Future
-    Future -. 接入 .-> Security
     Security -. 保护 .-> API
 ```
 
@@ -537,11 +536,15 @@ app/system + app/workspace
   -> 面向组织结构、数据权限范围、空间成员和临时授权
 ```
 
-二者的关系是“基础框架 + 业务模型示例”。后续如果要形成完整生产权限链路，需要明确主授权来源，并把 `app/system` 的角色权限或 `app/iam` 的租户角色权限统一映射到 `AuthContext`。
+当前 `app/iam` 是统一授权来源：`app.web.create_app()` 基于 `IamAuthContextService` 创建认证依赖，`app/iam`、`app/system`、`app/workspace` 的路由统一挂载该依赖，并通过 `require_tenant()` / `require_permission()` 完成接口级鉴权。`app/system` 的企业角色权限和 `app/workspace` 的空间成员角色暂未映射到 `AuthContext`，属后续演进点。
 
 ## 当前 API 边界
 
+三个路由工厂均已通过 `app.web.register_routes()` 统一注册，统一挂载基于 `IamAuthContextService` 的认证依赖。
+
 ### `/system`
+
+所有接口要求租户上下文，并按接口要求 `dept:*`、`user:*`、`role:*`、`menu:*` 权限码。
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
@@ -561,6 +564,8 @@ app/system + app/workspace
 
 ### `/workspaces`
 
+所有接口要求 `workspace:*`、`workspace:member:*`、`workspace:temp-auth:grant` 权限码；临时授权校验接口按查询参数独立校验。
+
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
 | `POST` | `/workspaces` | 创建业务空间。 |
@@ -570,6 +575,18 @@ app/system + app/workspace
 | `POST` | `/workspaces/temp-auth` | 授予临时权限。 |
 | `GET` | `/workspaces/temp-auth/check` | 校验临时权限是否有效。 |
 
+### `/iam`
+
+所有接口要求 `tenant:*`、`tenant:member:*` 权限码；`/iam/me` 只要求已认证。
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| `GET` | `/iam/me` | 获取当前请求的认证与授权上下文。 |
+| `POST` | `/iam/tenants` | 创建租户（需要 `tenant:create` 权限）。 |
+| `GET` | `/iam/tenants` | 查询租户列表（需要 `tenant:read` 权限）。 |
+| `POST` | `/iam/tenants/{tenant_id}/members` | 添加租户成员（需要租户上下文和 `tenant:member:add` 权限）。 |
+| `GET` | `/iam/tenants/{tenant_id}/members` | 查询租户成员列表（需要租户上下文和 `tenant:member:read` 权限）。 |
+
 ## 已知边界
 
 当前已经具备：
@@ -578,15 +595,15 @@ app/system + app/workspace
 - 异步数据库基础设施。
 - 统一 API 模型和异常响应。
 - 通用租户、认证上下文和权限依赖。
+- `app/iam` 统一授权来源，`/iam`、`/system`、`/workspaces` 路由统一注册并接入接口级鉴权。
 - 企业组织权限数据结构和 API。
 - 业务空间和临时授权 API。
 - 企业权限与空间表结构 SQL 脚本。
 
 当前尚未完整实现：
 
-- `app/system` 与 `app/iam` 的主授权模型统一。
 - 企业角色 `data_scope` 到业务 SQL 过滤条件的自动转换。
-- 临时授权作为统一权限依赖兜底策略。
+- 临时授权校验作为统一权限依赖兜底策略（授予接口已接入权限码依赖）。
 - 空间成员角色到 `AuthContext.roles` 的自动映射。
 - 权限缓存、审计日志和权限变更失效机制。
 
@@ -594,9 +611,8 @@ app/system + app/workspace
 
 后续演进建议：
 
-1. 明确 `app/iam` 和 `app/system` 的主授权来源。
-2. 为 `/system` 和 `/workspaces` 接口接入认证和权限依赖。
-3. 实现 `data_scope` 查询过滤器。
-4. 将临时授权接入统一权限判断链路。
-5. 增加审计日志和权限缓存。
-6. 引入正式数据库迁移工具管理脚本演进。
+1. 实现 `data_scope` 查询过滤器。
+2. 将临时授权校验接入统一权限判断链路。
+3. 将空间成员角色映射到 `AuthContext.roles`。
+4. 增加审计日志和权限缓存。
+5. 引入正式数据库迁移工具管理脚本演进。

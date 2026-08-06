@@ -298,7 +298,7 @@ APP_LOGGING__DIAGNOSE=false
 - `TenantMixin`
 - `resolve_tenant_from_header()`
 
-当前 `app/system` 与 `app/workspace` 主要实现企业权限数据结构和业务空间能力。后续若要让接口强制鉴权，应在路由层添加认证上下文依赖和权限依赖。
+当前 `app/system` 与 `app/workspace` 实现企业权限数据结构和业务空间能力，并与 `app/iam` 一起通过 `app.web.register_routes()` 统一注册：路由统一挂载基于 `IamAuthContextService` 的认证依赖，并按接口接入 `require_tenant()` / `require_permission()` 强制鉴权。新增业务接口时，应在路由上声明对应权限码依赖。
 
 ## 数据库脚本维护
 

@@ -332,7 +332,7 @@ GUEST
   -> 写入 sys_workspace_member
 ```
 
-当前空间成员角色尚未自动接入 `pkg/security` 的 `require_role()` 或 `require_permission()` 依赖。
+当前空间成员接口（添加/查询成员）已接入 `pkg/security` 的权限码依赖（`workspace:member:add` / `workspace:member:read`）。空间成员角色本身（`OWNER`/`ADMIN`/`MEMBER`/`GUEST`）尚未自动映射到 `AuthContext.roles`。
 
 ### 7.3 临时授权流程
 
@@ -361,15 +361,15 @@ GUEST
   -> 命中返回 True，否则返回 False
 ```
 
-当前临时授权是独立服务能力，尚未自动作为统一权限依赖的兜底逻辑。
+当前临时授权授予接口已接入权限码依赖（`workspace:temp-auth:grant`），校验接口仍为独立服务能力，尚未自动作为统一权限依赖的兜底逻辑。
 
 ## 8. 当前 API 边界
 
 ### 8.1 System 路由
 
-路由工厂：`create_system_router(db_dependency)`
+路由工厂：`create_system_router(db_dependency, auth_dependency)`
 
-前缀：`/system`
+前缀：`/system`。所有路由统一挂载认证依赖和 `require_tenant()` 租户要求，并按接口要求 `dept:*`、`user:*`、`role:*`、`menu:*` 权限码。
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
@@ -389,9 +389,9 @@ GUEST
 
 ### 8.2 Workspace 路由
 
-路由工厂：`create_workspace_router(db_dependency)`
+路由工厂：`create_workspace_router(db_dependency, auth_dependency)`
 
-前缀：`/workspaces`
+前缀：`/workspaces`。所有路由统一挂载认证依赖，并按接口要求 `workspace:*`、`workspace:member:*`、`workspace:temp-auth:grant` 权限码；临时授权校验接口按查询参数独立校验，不要求权限码。
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
@@ -402,7 +402,21 @@ GUEST
 | `POST` | `/workspaces/temp-auth` | 授予临时权限。 |
 | `GET` | `/workspaces/temp-auth/check` | 校验临时权限是否有效。 |
 
-当前这些路由通过工厂函数暴露，尚未在 `main.py` 中统一注册。
+### 8.3 IAM 路由
+
+路由工厂：`create_iam_router(db_dependency, auth_dependency)`
+
+前缀：`/iam`。所有路由统一挂载认证依赖，并按接口要求 `tenant:*`、`tenant:member:*` 权限码。
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| `GET` | `/iam/me` | 获取当前请求的认证与授权上下文。 |
+| `POST` | `/iam/tenants` | 创建租户（需要 `tenant:create` 权限）。 |
+| `GET` | `/iam/tenants` | 查询租户列表（需要 `tenant:read` 权限）。 |
+| `POST` | `/iam/tenants/{tenant_id}/members` | 添加租户成员（需要租户上下文和 `tenant:member:add` 权限）。 |
+| `GET` | `/iam/tenants/{tenant_id}/members` | 查询租户成员列表（需要租户上下文和 `tenant:member:read` 权限）。 |
+
+以上三个路由工厂均已在 `app/web.py` 的 `register_routes()` 中统一注册：先基于 `IamAuthContextService` 创建认证依赖，再传入各路由工厂完成挂载。
 
 ## 9. 当前完整业务链路示例
 
@@ -482,27 +496,26 @@ scripts/2026_08_04_enterprise_permission_schema.sql
 - 租户内 RBAC 上下文加载。
 - FastAPI 权限依赖工厂。
 - 租户感知 CRUD 基类。
+- `app/iam` 作为统一授权来源，提供租户、成员、角色、权限码数据模型和上下文加载服务。
 - 企业部门、用户、角色、菜单/API 权限关系。
 - 用户权限画像聚合。
 - 业务空间成员和临时授权。
-- `app.web.create_app()` 已统一注册 `app/system` 和 `app/workspace` 路由。
+- `app.web.create_app()` 已统一注册 `app/iam`、`app/system`、`app/workspace` 路由，并统一挂载基于 `IamAuthContextService` 的认证依赖。
+- `/iam`、`/system`、`/workspaces` 接口已按接口接入 `require_tenant()` / `require_permission()` 鉴权。
 - 对应 SQL 初始化脚本。
 
 当前尚未完整打通：
 
-- `app/system` 与 `app/iam` 是两套权限数据模型，当前尚未统一到同一个授权来源。
-- `app/system`、`app/workspace` 路由尚未强制接入 `pkg/security` 统一鉴权依赖。
 - 企业角色 `data_scope` 尚未转换为实际业务查询过滤条件。
-- 临时授权尚未接入 `pkg/security` 统一权限依赖。
-- 空间成员角色尚未接入统一权限依赖。
+- 临时授权校验尚未作为统一权限拦截的兜底策略（授予接口已接入权限码依赖）。
+- 空间成员角色（`OWNER`/`ADMIN`/`MEMBER`/`GUEST`）尚未映射到 `AuthContext.roles`。
 - 审计日志、权限缓存、权限变更失效机制尚未实现。
 
 建议后续演进顺序：
 
 ```text
-先明确 app/iam 与 app/system 的主授权模型
-  -> 将 system/workspace 接口接入 require_permission / require_tenant
-  -> 实现 data_scope 查询过滤器
-  -> 将临时授权作为权限兜底策略接入
+实现 data_scope 查询过滤器
+  -> 将临时授权校验作为权限兜底策略接入
+  -> 将空间成员角色映射到 AuthContext.roles
   -> 增加审计与缓存
 ```
