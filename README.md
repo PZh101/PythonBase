@@ -1,11 +1,11 @@
 # PythonBase
 
-PythonBase 是一个基于 FastAPI、Pydantic v2、SQLAlchemy Async 和 uv 的 Python 后端基础项目。项目当前已经从纯基础框架扩展为一套带企业组织权限、租户 RBAC、业务空间和临时授权示例的 API 骨架。
+PythonBase 是一个基于 FastAPI、Pydantic v2、SQLAlchemy Async 和 uv 的 Python 后端基础项目。项目当前已经从纯基础框架扩展为一套带企业组织权限、租户 RBAC、业务空间、临时授权以及基于 JWT 的认证登录示例的 API 骨架。
 
 项目目标是提供一套可复用的后端工程底座：
 
-- 用 `pkg/` 沉淀通用能力，包括统一 API 模型、异常处理、配置解析、异步数据库、租户上下文和权限依赖。
-- 用 `app/` 承载业务模块，目前包含 IAM、企业组织权限和业务空间示例。
+- 用 `pkg/` 沉淀通用能力，包括统一 API 模型、异常处理、配置解析、异步数据库、租户上下文、权限依赖、JWT 签发解析、PBKDF2 密码哈希。
+- 用 `app/` 承载业务模块，目前包含 IAM（含密码登录）、企业组织权限和业务空间示例。
 - 用 `app.web.create_app()` 统一创建 FastAPI 应用、管理数据库生命周期、注册异常处理器和业务路由。
 - 用 `scripts/` 和 `docs/` 记录数据库结构、权限租户逻辑和开发约定。
 
@@ -27,7 +27,8 @@ app = create_app()
 - 创建并初始化 `AsyncDatabaseManager`。
 - 使用 FastAPI `lifespan` 管理数据库连接池启动和释放。
 - 注册全局异常处理器。
-- 注册 `/system` 和 `/workspaces` 业务路由。
+- 根据 `SecuritySettings.auth_mode` 选择 HEADER 或 JWT 认证路径，并注册 `/system`、`/workspaces`、`/iam` 业务路由。
+- 在启用 `enable_password_login` 时额外挂载 `/iam/auth` 登录认证路由。
 
 ### 企业组织与权限
 
@@ -67,11 +68,31 @@ app = create_app()
 - `Principal` 表示当前用户。
 - `TenantContext` 表示当前租户。
 - `AuthContext` 聚合用户、租户、成员、角色和权限。
-- `create_auth_context_dependency()` 从 `X-User-Id`、`X-Tenant-Id` 请求头加载上下文。
+- `create_auth_context_dependency()` 支持 `AuthMode.HEADER`（从 `X-User-Id`、`X-Tenant-Id` 头加载）和 `AuthMode.JWT`（从 `Authorization: Bearer <token>` 加载）两种互斥模式。
 - `require_tenant()`、`require_permission()`、`require_any_permission()`、`require_role()` 提供 FastAPI 权限依赖。
 - `TenantAwareCrud` 为带 `tenant_id` 的业务表提供租户隔离 CRUD。
+- `TokenService` 与 `JwtTokenResolver` 提供基于 HS256 的 JWT 签发与解析（无第三方依赖）。
+- `PasswordHasher` 基于 PBKDF2-HMAC-SHA256 实现密码哈希和校验。
 
 当前 `app/system` 与 `app/workspace` 已注册为业务 API，但尚未把所有接口强制接入通用权限依赖；后续可按业务需要逐步打通。
+
+### 账号密码登录与 JWT 认证
+
+模块路径：`app/iam/auth_routes.py`、`app/iam/auth_service.py`
+
+当 `security.enable_password_login=true` 时，`app.web.create_app()` 会自动挂载以下路由：
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| `POST` | `/iam/auth/login` | 账号密码登录，签发访问令牌和刷新令牌。 |
+| `POST` | `/iam/auth/refresh` | 使用刷新令牌换取新的 token 对。 |
+| `POST` | `/iam/auth/logout` | 登出当前用户，使历史 token 全部失效。 |
+| `POST` | `/iam/auth/password` | 修改当前用户密码并重新签发 token。 |
+
+- 密码使用 PBKDF2-HMAC-SHA256（OWASP 推荐 600000 次迭代）哈希后存储在 `iam_user_credentials.password_hash`。
+- `iam_user_credentials.token_version` 在登出或重置密码时 +1，所有版本号低于新值的访问 token 立即失效。
+- `iam_user_credentials.failed_attempts` / `locked_until` 实现连续失败锁定，由 `PasswordPolicySettings.max_failed_attempts` / `lock_duration_seconds` 控制。
+- 启用密码登录或 `auth_mode=jwt` 时必须配置 `security.token.secret`。
 
 ## 技术栈
 
@@ -82,6 +103,8 @@ app = create_app()
 - asyncpg / asyncmy：PostgreSQL / MySQL 异步驱动
 - Loguru：统一应用日志输出
 - PyYAML：环境变量值解析
+- PyJWT（项目自带 HS256 实现，标准库 hmac + hashlib）：访问令牌与刷新令牌签发
+- PBKDF2-HMAC-SHA256（标准库 hashlib）：密码哈希
 - pytest：测试框架
 - uv：依赖管理和命令运行
 
@@ -105,7 +128,7 @@ uv run python main.py
 uv run pytest -v
 
 # 运行基础能力测试
-uv run pytest tests/pkg/test_api.py tests/pkg/test_exceptions.py tests/pkg/config/test_environment.py tests/pkg/config/test_models.py tests/pkg/database tests/pkg/security tests/pkg/tenant -v
+uv run pytest tests/pkg/config tests/pkg/database tests/pkg/security tests/pkg/tenant -v
 
 # 运行当前业务模块测试
 uv run pytest tests/app/test_web.py tests/app/system tests/app/workspace tests/app/iam -v
@@ -132,6 +155,12 @@ APP_DATABASE__POOL__SIZE=20
 APP_DATABASE__POOL__PRE_PING=false
 APP_LOGGING__LEVEL=INFO
 APP_LOGGING__SERIALIZE=false
+APP_SECURITY__AUTH__MODE=header
+APP_SECURITY__ENABLE__PASSWORD__LOGIN=false
+APP_SECURITY__TOKEN__SECRET=please-replace-with-a-long-random-string
+APP_SECURITY__TOKEN__ACCESS__TOKEN__TTL__SECONDS=3600
+APP_SECURITY__TOKEN__REFRESH__TOKEN__TTL__SECONDS=86400
+APP_SECURITY__PASSWORD__ITERATIONS=600000
 ```
 
 配置合并优先级为：`application.yml` 公共配置 < `profiles.<active>` < `application-<active>.yml` < `APP_` 环境变量。环境变量值会优先按 YAML 标量解析，因此可以表达布尔值、数字、列表和字典。
@@ -171,7 +200,7 @@ scripts/2026_08_04_enterprise_permission_schema.sql
 ```text
 PythonBase/
 ├── app/                  # 应用业务模块
-│   ├── iam/              # 租户 IAM 与 AuthContext 加载示例
+│   ├── iam/              # 租户 IAM、AuthContext 加载、账号密码登录
 │   ├── system/           # 企业组织、用户、角色、菜单/API 权限
 │   ├── workspace/        # 业务空间、空间成员、临时授权
 │   └── web.py            # FastAPI 应用创建和路由注册
@@ -180,7 +209,7 @@ PythonBase/
 │   ├── common/           # BaseSchema、ApiResponse、异常处理
 │   ├── config/           # 配置模型和环境变量解析
 │   ├── database/         # SQLAlchemy Async 基础设施和 CRUD
-│   ├── security/         # 认证上下文和权限依赖
+│   ├── security/         # 认证上下文、JWT、PBKDF2、权限依赖
 │   └── tenant/           # 租户上下文、解析器和 TenantMixin
 ├── scripts/              # 数据库和运维脚本
 ├── tests/                # 测试文件
@@ -218,8 +247,8 @@ class UserResponse(BaseSchema):
 - [开发说明](docs/DEVELOPMENT.md)
 - [架构文档](docs/ARCHITECTURE.md)：包含 Mermaid 总体架构图、启动流程图、请求时序图和权限数据关系图。
 - [测试指南](docs/TEST.md)
-- [当前权限、租户与资源隔离业务逻辑](docs/CURRENT_PERMISSION_TENANT_BUSINESS.md)
 - [权限租户流程](docs/PERMISSION_TENANT_FLOW.md)
+- [当前权限、租户与资源隔离业务逻辑](docs/CURRENT_PERMISSION_TENANT_BUSINESS.md)
 - [用户配置模块设计](docs/superpowers/specs/2026-08-04-user-configuration-design.md)
 - [数据库层设计](docs/superpowers/specs/2026-08-04-database-layer-design.md)
 - [多租户角色权限框架设计](docs/superpowers/specs/2026-08-04-tenant-rbac-design.md)

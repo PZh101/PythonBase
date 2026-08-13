@@ -55,8 +55,13 @@ uv run pytest tests/app/test_web.py -v
 
 - `RuntimeSettings`：运行时根配置。
 - `AppSettings`：应用名称和 profile。
+- `ProfileSettings`：profile 配置（`active` 字段）。
 - `DatabaseSettings`：数据库类型、连接参数和连接池配置。
 - `LoggingSettings`：Loguru 日志级别、格式和输出模式配置。
+- `SecuritySettings`：认证安全总配置。
+- `PasswordPolicySettings`：密码哈希算法、迭代次数、失败上限、锁定时长。
+- `TokenSettings`：JWT 签发配置（`issuer`、`secret`、`algorithm`、`access_token_ttl_seconds`、`refresh_token_ttl_seconds`、`clock_skew_seconds`）。
+- `AuthMode` 枚举：决定走 `HEADER`（X- 头）还是 `JWT`（`Authorization: Bearer`）解析路径。
 - `load_configuration()`：读取 `application.yml`、profile 配置和环境变量覆盖。
 - `parse_environment()`：解析 `APP_` 前缀环境变量。
 - `get_environment_profile()`：读取 `APP_PROFILE`。
@@ -88,6 +93,38 @@ APP_DATABASE__POOL__SIZE=20
         }
     }
 }
+```
+
+### 认证安全配置
+
+`SecuritySettings`（`security` 段）汇总认证相关配置：
+
+| 字段 | 说明 |
+| --- | --- |
+| `enable_password_login` | 是否挂载 `/iam/auth/*` 路由（登录、刷新、登出、改密）。 |
+| `auth_mode` | `AuthMode.HEADER` 或 `AuthMode.JWT`。 |
+| `password` | `PasswordPolicySettings`：算法（默认 `pbkdf2_sha256`）、迭代次数、失败上限、锁定时长。 |
+| `token` | `TokenSettings`：JWT 签名密钥、算法、访问/刷新 token TTL、时钟漂移容忍秒数。 |
+
+`SecuritySettings` 在 `model_validator(mode="after")` 阶段校验：
+
+- `enable_password_login=true` 时 `token.secret` 必填。
+- `auth_mode=jwt` 时 `token.secret` 必填。
+
+应用启动后，`app.web.create_app()` 会读取 `security.auth_mode`：
+
+- `HEADER`（默认）：`create_auth_dependency` 走 `X-User-Id` / `X-Tenant-Id` 头解析。
+- `JWT`：`create_auth_dependency` 走 `Authorization: Bearer <jwt>` 解析；启动时若未提供 `token_resolver` 会抛 `RuntimeError` 兜底。
+
+启用密码登录或 JWT 模式时，建议通过环境变量配置 `secret`：
+
+```text
+APP_SECURITY__ENABLE__PASSWORD__LOGIN=true
+APP_SECURITY__AUTH__MODE=jwt
+APP_SECURITY__TOKEN__SECRET=please-replace-with-a-long-random-string
+APP_SECURITY__TOKEN__ACCESS__TOKEN__TTL__SECONDS=3600
+APP_SECURITY__TOKEN__REFRESH__TOKEN__TTL__SECONDS=86400
+APP_SECURITY__PASSWORD__ITERATIONS=600000
 ```
 
 ## 应用入口与路由注册
@@ -287,18 +324,23 @@ APP_LOGGING__DIAGNOSE=false
 
 通用权限能力位于 `pkg/security`：
 
-- `create_auth_context_dependency(provider)`：加载认证上下文。
+- `create_auth_context_dependency(provider, *, auth_mode, token_resolver=None)`：按 `AuthMode` 加载认证上下文。
 - `require_tenant()`：要求租户上下文。
 - `require_permission("permission:code")`：要求指定权限码。
 - `require_role("role_code")`：要求指定角色。
+- `TokenService` / `JwtTokenResolver`：HS256 JWT 签发与解析（无第三方依赖）。
+- `PasswordHasher`：PBKDF2-HMAC-SHA256 密码哈希与校验。
+- `extract_bearer_token(authorization_header)`：从 `Authorization` 头提取 Bearer token。
 
 租户上下文能力位于 `pkg/tenant`：
 
 - `TenantContext`
 - `TenantMixin`
-- `resolve_tenant_from_header()`
+- `resolve_tenant_id_from_header()`
 
 当前 `app/system` 与 `app/workspace` 实现企业权限数据结构和业务空间能力，并与 `app/iam` 一起通过 `app.web.register_routes()` 统一注册：路由统一挂载基于 `IamAuthContextService` 的认证依赖，并按接口接入 `require_tenant()` / `require_permission()` 强制鉴权。新增业务接口时，应在路由上声明对应权限码依赖。
+
+启用 `security.enable_password_login=true` 时，`register_routes()` 还会挂载 `/iam/auth/*` 路由：登录、刷新无需认证，登出与改密走认证依赖。开发账号密码登录相关接口时直接调用 `app.iam.auth_routes:create_iam_auth_router` 即可，无需关心 HEADER / JWT 的差异——认证模式由 `SecuritySettings.auth_mode` 在启动期决定。
 
 ## 数据库脚本维护
 

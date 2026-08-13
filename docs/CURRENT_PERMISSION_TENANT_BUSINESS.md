@@ -110,6 +110,7 @@ tenant:settings:update
 | `IamPermission` | `iam_permissions` | 系统权限定义。 |
 | `IamTenantMemberRole` | `iam_tenant_member_roles` | 成员和角色关系。 |
 | `IamRolePermission` | `iam_role_permissions` | 角色和权限关系。 |
+| `IamUserCredential` | `iam_user_credentials` | 用户登录凭证（密码哈希、token 版本号、失败计数、锁定时间）。 |
 
 核心关系：
 
@@ -117,6 +118,7 @@ tenant:settings:update
 IamUser
   -> IamTenantMember
   -> IamTenant
+  -> IamUserCredential （一对一）
 
 IamTenantMember
   -> IamTenantMemberRole
@@ -127,17 +129,37 @@ IamTenantMember
 
 角色归属于租户，`iam_roles` 使用 `(tenant_id, code)` 保证同一租户内角色编码唯一。权限码是系统级定义，角色通过关系表绑定权限。
 
+`IamUserCredential` 关键字段：
+
+| 字段 | 说明 |
+| --- | --- |
+| `password_hash` | PBKDF2-HMAC-SHA256 哈希字符串，格式 `pbkdf2_sha256$<iter>$<salt_hex>$<hash_hex>`。 |
+| `token_version` | 凭证版本号；登出或重置密码时 +1，所有版本号低于新值的访问 token 立即失效。 |
+| `failed_attempts` | 连续登录失败计数；成功后清零。 |
+| `locked_until` | 锁定截止时间；超过 `PasswordPolicySettings.max_failed_attempts` 时写入。 |
+
 ### 4.2 加载授权上下文流程
 
 服务：`app/iam/service.py` 中的 `IamAuthContextService`
 
+认证上下文加载的入口在 `app/web.py:create_auth_dependency()`。该入口按 `RuntimeSettings.security.auth_mode` 严格选择解析路径，两种模式互不干扰：
+
+| `AuthMode` | 取值来源 | 忽略 |
+| --- | --- | --- |
+| `HEADER`（默认） | `X-User-Id` / `X-Tenant-Id` 头 | `Authorization` |
+| `JWT` | `Authorization: Bearer <jwt>` 头 | X- 头 |
+
+`AuthMode.JWT` 模式下必须提供 `token_resolver`（`JwtTokenResolver`）；未提供时启动期 `create_auth_dependency()` 会抛 `RuntimeError`。
+
+`IamAuthContextService.load_context` 流程：
+
 ```text
-读取 X-User-Id 和 X-Tenant-Id
+根据 auth_mode 解析得到 (user_id, tenant_id)
   -> 查询启用状态用户
   -> 构造 Principal
-  -> 如果没有 X-Tenant-Id：
+  -> 如果没有 tenant_id：
        返回不带租户、不带成员、不带角色权限的 AuthContext
-  -> 如果有 X-Tenant-Id：
+  -> 如果有 tenant_id：
        查询 active 租户
        查询用户在该租户内的 active 成员身份
        非平台管理员且成员不存在时拒绝访问
@@ -150,8 +172,9 @@ IamTenantMember
 
 | 场景 | 行为 |
 | --- | --- |
-| 未传 `X-User-Id` | 抛出认证失败异常。 |
+| 未传 `X-User-Id`（HEADER 模式）/ 无 Bearer token（JWT 模式） | 抛出认证失败异常。 |
 | 用户不存在或未启用 | 抛出认证失败异常。 |
+| JWT 模式下 token 签名错误或过期 | 抛出 `InvalidCredentialException`（错误码 40101）。 |
 | 租户不存在或非 active | 抛出租户访问拒绝异常。 |
 | 用户不是租户成员且不是平台管理员 | 抛出租户访问拒绝异常。 |
 | 平台管理员进入租户但没有成员身份 | 允许生成租户上下文，角色和权限为空。 |
@@ -418,13 +441,77 @@ GUEST
 
 以上三个路由工厂均已在 `app/web.py` 的 `register_routes()` 中统一注册：先基于 `IamAuthContextService` 创建认证依赖，再传入各路由工厂完成挂载。
 
+### 4.4 账号密码登录与 JWT
+
+服务：`app/iam/auth_service.py` 中的 `IamAuthService`；路由：`app/iam/auth_routes.py` 中的 `create_iam_auth_router`。
+
+挂载条件：`RuntimeSettings.security.enable_password_login=true` 时，`app/web.py:register_routes()` 才会调用 `create_iam_auth_router(...)` 挂载 `/iam/auth` 路由，并注入 `security_settings` 和 `token_service`。
+
+密码哈希：
+
+- 使用 `pkg/security/token.py:PasswordHasher`（基于标准库 `hashlib.pbkdf2_hmac`）。
+- 算法标识固定为 `pbkdf2_sha256`，迭代次数来自 `PasswordPolicySettings.iterations`（默认 600000）。
+- 存储格式 `pbkdf2_sha256$<iter>$<salt_hex>$<hash_hex>`。
+
+登录流程：
+
+```text
+输入 username / password
+  -> IamRepository.get_user_by_username 查询 iam_users
+  -> 用户不存在或未启用：InvalidCredentialException（避免账号枚举）
+  -> IamRepository.get_credential 查询 iam_user_credentials
+  -> 凭证为空：InvalidCredentialException
+  -> locked_until 未过期：InvalidCredentialException("账号已被锁定")
+  -> PasswordHasher.verify 校验
+       失败：IamRepository.increment_failed_attempts
+            失败次数达到 max_failed_attempts：写入 locked_until
+       抛出 InvalidCredentialException
+  -> IamRepository.mark_login_success（清零失败计数、刷新 last_login_at）
+  -> IamRepository.bump_token_version（轮换凭证版本号）
+  -> TokenService.issue_access_token + issue_refresh_token
+  -> 返回 TokenResponse（access_token、refresh_token、ttl 等）
+```
+
+刷新流程：
+
+```text
+输入 refresh_token
+  -> TokenService.decode(expected_type="refresh")
+  -> IamRepository.get_active_user / get_credential
+  -> 校验 token_version 一致，否则 InvalidCredentialException
+  -> 校验 locked_until，否则拒绝
+  -> bump_token_version 轮换版本号
+  -> 签发新的 access + refresh
+```
+
+登出与改密：
+
+- `logout(user_id)`：仅 `bump_token_version`，历史 token 全部失效。
+- `change_password(user_id, old_password, new_password)`：校验旧密码 → `update_password_hash`（自动 `+1 token_version`、清零失败计数、清除锁定）→ 签发新 token 对。
+
+token 失效机制：
+
+- `TokenService.decode` 校验 `iat/exp` 时允许 `clock_skew_seconds` 容忍时钟漂移。
+- 凭证版本号校验由业务侧完成：JWT 模式解析后只拿到 `(user_id, tenant_id, token_version)`，是否有效还需调用方比对数据库中的 `token_version`。当前 `IamAuthContextService.load_context` 未做 token_version 校验，调用方需自行把关。
+
+API 路由（前缀 `/iam/auth`，仅在 `enable_password_login=true` 时注册）：
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| `POST` | `/iam/auth/login` | 账号密码登录，无需认证。 |
+| `POST` | `/iam/auth/refresh` | 刷新访问令牌，无需认证，靠 refresh token 自证。 |
+| `POST` | `/iam/auth/logout` | 登出当前用户，需要认证。 |
+| `POST` | `/iam/auth/password` | 修改当前用户密码，需要认证。 |
+
 ## 9. 当前完整业务链路示例
 
 ### 9.1 租户内接口访问
 
 ```text
-前端发起请求，携带 X-User-Id 和 X-Tenant-Id
-  -> FastAPI 认证依赖调用 IamAuthContextService
+前端发起请求，按 security.auth_mode 选择：
+  HEADER 模式：携带 X-User-Id 和 X-Tenant-Id
+  JWT 模式  ：携带 Authorization: Bearer <access_token>
+  -> FastAPI 认证依赖（create_auth_dependency）调用 IamAuthContextService
   -> IAM 仓储查询用户、租户、成员、角色、权限
   -> 生成 AuthContext 并放入 request.state
   -> 权限依赖读取 AuthContext 并校验租户、角色或权限
@@ -432,7 +519,21 @@ GUEST
   -> 租户业务数据应通过 tenant_id 做行级隔离
 ```
 
-### 9.2 企业用户权限画像
+### 9.2 账号密码登录流程
+
+```text
+前端调用 POST /iam/auth/login，提交 username + password
+  -> IamAuthService.login 校验凭证
+  -> 成功：bump_token_version + issue_access_token + issue_refresh_token
+  -> 返回 TokenResponse
+前端使用 access_token 调业务接口（AuthMode.JWT 模式）
+  -> access_token 过期后调用 POST /iam/auth/refresh 换取新 token 对
+前端退出登录
+  -> POST /iam/auth/logout
+  -> 服务端 bump_token_version，所有历史 token 立即失效
+```
+
+### 9.3 企业用户权限画像
 
 ```text
 管理员创建部门、用户、角色和菜单/API 资源
@@ -443,7 +544,7 @@ GUEST
   -> 前端或调用方获得部门、角色和权限码集合
 ```
 
-### 9.3 自定义数据权限
+### 9.4 自定义数据权限
 
 ```text
 创建角色时设置 data_scope = 5
@@ -453,7 +554,7 @@ GUEST
 
 当前只完成数据结构和关系维护，过滤条件生成仍需后续实现。
 
-### 9.4 临时资源授权
+### 9.5 临时资源授权
 
 ```text
 授权人创建临时授权
@@ -492,11 +593,13 @@ scripts/2026_08_04_enterprise_permission_schema.sql
 当前已具备：
 
 - 通用 `AuthContext`。
-- 请求头用户和租户识别。
+- `AuthMode` 互斥的 HEADER / JWT 两种认证解析路径。
 - 租户内 RBAC 上下文加载。
 - FastAPI 权限依赖工厂。
 - 租户感知 CRUD 基类。
-- `app/iam` 作为统一授权来源，提供租户、成员、角色、权限码数据模型和上下文加载服务。
+- `app/iam` 作为统一授权来源，提供租户、成员、角色、权限码、登录凭证（`IamUserCredential`）数据模型和上下文加载服务。
+- 账号密码登录、刷新、登出、改密流程（`/iam/auth/*`，仅在 `enable_password_login=true` 时挂载）。
+- HS256 JWT 签发与解析（`TokenService` / `JwtTokenResolver`）、PBKDF2-HMAC-SHA256 密码哈希与账号锁定。
 - 企业部门、用户、角色、菜单/API 权限关系。
 - 用户权限画像聚合。
 - 业务空间成员和临时授权。
@@ -509,7 +612,8 @@ scripts/2026_08_04_enterprise_permission_schema.sql
 - 企业角色 `data_scope` 尚未转换为实际业务查询过滤条件。
 - 临时授权校验尚未作为统一权限拦截的兜底策略（授予接口已接入权限码依赖）。
 - 空间成员角色（`OWNER`/`ADMIN`/`MEMBER`/`GUEST`）尚未映射到 `AuthContext.roles`。
-- 审计日志、权限缓存、权限变更失效机制尚未实现。
+- 审计日志、权限缓存尚未实现。
+- `IamAuthContextService.load_context` 暂未校验 JWT 模式下的 `token_version`，调用方需自行把关。
 
 建议后续演进顺序：
 

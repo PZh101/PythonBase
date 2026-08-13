@@ -83,7 +83,9 @@
 
 平台管理员绕过角色和权限码校验；`require_tenant()` 仍要求存在租户和成员身份。
 
-`app/web.py` 中的 `create_auth_dependency(db_dependency)` 基于该服务创建 FastAPI 认证依赖，`register_routes()` 将其统一传入三个路由工厂。
+`app/web.py` 中的 `create_auth_dependency()` 基于该服务创建 FastAPI 认证依赖，`register_routes()` 将其统一传入三个路由工厂。
+
+入口解析路径由 `RuntimeSettings.security.auth_mode` 决定：`AuthMode.HEADER`（默认）走 X- 头；`AuthMode.JWT` 走 `Authorization: Bearer <jwt>`，并需要配套的 `JwtTokenResolver`。
 
 ### 3.3 API 路由
 
@@ -98,6 +100,21 @@
 | `GET` | `/iam/tenants` | 查询租户列表（需要 `tenant:read` 权限）。 |
 | `POST` | `/iam/tenants/{tenant_id}/members` | 添加租户成员（需要租户上下文和 `tenant:member:add` 权限）。 |
 | `GET` | `/iam/tenants/{tenant_id}/members` | 查询租户成员列表（需要租户上下文和 `tenant:member:read` 权限）。 |
+
+### 3.4 账号密码登录与 JWT
+
+服务：`app/iam/auth_service.py`；路由工厂：`create_iam_auth_router(...)`。
+
+仅在 `security.enable_password_login=true` 时由 `app.web.register_routes()` 挂载。前缀 `/iam/auth`。
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| `POST` | `/iam/auth/login` | 账号密码登录（无需认证）。 |
+| `POST` | `/iam/auth/refresh` | 刷新访问令牌（无需认证，靠 refresh token 自证）。 |
+| `POST` | `/iam/auth/logout` | 登出当前用户（需认证）。 |
+| `POST` | `/iam/auth/password` | 修改当前用户密码（需认证）。 |
+
+密码哈希基于 PBKDF2-HMAC-SHA256，存储在 `iam_user_credentials` 表中。登出或改密时通过 `bump_token_version` 让所有历史 token 立即失效。
 
 ## 4. 企业组织与角色权限模块
 
@@ -307,17 +324,28 @@ scripts/2026_08_04_enterprise_permission_schema.sql
 应用入口 `app/web.py` 的 `register_routes()` 已完成统一注册，包含认证依赖创建和三个路由工厂的挂载：
 
 ```python
+from app.iam.auth_routes import create_iam_auth_router
 from app.iam.routes import create_iam_router
 from app.system.routes import create_system_router
 from app.workspace.routes import create_workspace_router
-from app.web import create_auth_dependency
 from pkg.database.dependencies import create_db_session_dependency
 
-db_dependency = create_db_session_dependency(database_manager)
-auth_dependency = create_auth_dependency(db_dependency)
+# create_app 内部已经按 settings.security.auth_mode 解析出 auth_dependency
+# 业务代码无需关心 HEADER / JWT 的差异，只需注入 auth_dependency
 app.include_router(create_system_router(db_dependency, auth_dependency))
 app.include_router(create_workspace_router(db_dependency, auth_dependency))
 app.include_router(create_iam_router(db_dependency, auth_dependency))
+
+# 仅在 security.enable_password_login=true 时挂载
+if settings.security.enable_password_login and token_service is not None:
+    app.include_router(
+        create_iam_auth_router(
+            db_dependency=db_dependency,
+            auth_dependency=auth_dependency,
+            security_settings=settings.security,
+            token_service=token_service,
+        )
+    )
 ```
 
 如果读接口希望不自动提交事务，可以使用只读 Session 依赖注册独立路由或调整路由工厂入参。

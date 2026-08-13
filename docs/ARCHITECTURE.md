@@ -32,7 +32,7 @@ flowchart TB
         Logging["pkg/common/logging<br/>Loguru 统一日志"]
         Config["pkg/config<br/>运行时配置、环境变量解析"]
         Database["pkg/database<br/>AsyncEngine、Session、CRUD"]
-        Security["pkg/security<br/>AuthContext、权限依赖"]
+        Security["pkg/security<br/>AuthContext、TokenService、权限依赖"]
         Tenant["pkg/tenant<br/>TenantContext、TenantMixin"]
     end
 
@@ -76,13 +76,13 @@ HTTP 入口
 应用业务层 app/
   -> app/system：企业组织、用户、角色、菜单/API 权限
   -> app/workspace：业务空间、空间成员、临时授权
-  -> app/iam：租户 IAM 与 AuthContext 加载示例
+  -> app/iam：租户 IAM、AuthContext 加载、账号密码登录与 JWT 认证
 
 通用框架层 pkg/
   -> pkg/common：BaseSchema、ApiResponse、业务异常
   -> pkg/config：运行时配置和环境变量解析
   -> pkg/database：异步数据库、Session、CRUD
-  -> pkg/security：认证上下文、权限判断、FastAPI 依赖
+  -> pkg/security：AuthContext、JWT（HS256）、PBKDF2 密码哈希、权限依赖
   -> pkg/tenant：租户上下文、TenantMixin、租户解析
 
 支撑资源
@@ -259,8 +259,8 @@ FastAPI Dependency
 
 ```mermaid
 flowchart LR
-    Request["HTTP 请求<br/>X-User-Id / X-Tenant-Id"]
-    AuthDep["create_auth_context_dependency()"]
+    Request["HTTP 请求<br/>X-User-Id / X-Tenant-Id<br/>或 Authorization: Bearer <jwt>"]
+    AuthDep["create_auth_dependency()<br/>由 AuthMode 决定解析路径"]
     Provider["AuthContextProvider<br/>应用层实现"]
     IAMRepo["app/iam Repository<br/>用户、租户、成员、角色、权限"]
     AuthContext["AuthContext<br/>Principal + Tenant + Roles + Permissions"]
@@ -291,12 +291,17 @@ flowchart LR
 | `TenantContext` | 当前租户上下文。 |
 | `AuthContext` | 当前请求的用户、租户、成员、角色和权限快照。 |
 | `AuthContextProvider` | 应用层加载授权上下文的协议。 |
+| `AuthMode` | 决定走 `X-User-Id/X-Tenant-Id` 头还是 `Authorization: Bearer <jwt>` 的解析模式。 |
+| `TokenService` | HS256 JWT 签发与解析（无第三方依赖）。 |
+| `JwtTokenResolver` | 在 JWT 模式下从 Bearer token 解析出 `(user_id, tenant_id, token_version)`。 |
+| `PasswordHasher` | PBKDF2-HMAC-SHA256 密码哈希与校验。 |
 
 权限依赖：
 
 ```text
-create_auth_context_dependency(provider)
-  -> 从 X-User-Id / X-Tenant-Id 加载 AuthContext
+create_auth_dependency(db_dependency, *, auth_mode, token_resolver)
+  -> 依据 auth_mode 走 HEADER 或 JWT 解析路径
+  -> IamAuthContextService.load_context 加载 AuthContext
   -> 写入 request.state.auth_context
 
 require_tenant()
@@ -306,7 +311,58 @@ require_role()
   -> 从 request.state.auth_context 读取并校验
 ```
 
+`AuthMode`（`pkg/config/models.py:AuthMode`）严格决定解析路径：
+
+- `AuthMode.HEADER`（默认）：从 `X-User-Id` / `X-Tenant-Id` 头解析，忽略 `Authorization`。
+- `AuthMode.JWT`：从 `Authorization: Bearer <jwt>` 头解析，忽略 X- 头；此时 `token_resolver` 必须提供，否则启动时会抛 `RuntimeError`。
+
 框架层只依赖 `AuthContextProvider` 协议，不直接依赖具体 IAM 表结构。当前 `app/iam` 提供基于租户成员、角色和权限关系的上下文加载实现，`app.web.create_auth_dependency()` 将其接入 FastAPI 认证依赖。
+
+### 账号密码登录与 JWT 签发
+
+模块路径：`app/iam/auth_routes.py`、`app/iam/auth_service.py`、`pkg/security/token.py`
+
+当 `security.enable_password_login=true` 时，`app.web.register_routes()` 会额外挂载 `/iam/auth` 路由：
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Client as 调用方
+    participant Login as POST /iam/auth/login
+    participant Service as IamAuthService
+    participant Repo as IamRepository
+    participant Token as TokenService
+    participant DB as Database
+
+    Client->>Login: username + password
+    Login->>Service: login(username, password)
+    Service->>Repo: get_user_by_username
+    Repo->>DB: 查询 iam_users
+    DB-->>Repo: IamUser
+    Repo-->>Service: IamUser
+    Service->>Repo: get_credential(user_id)
+    Repo->>DB: 查询 iam_user_credentials
+    DB-->>Repo: IamUserCredential
+    Service->>Service: PasswordHasher.verify
+    alt 验证失败
+        Service->>Repo: increment_failed_attempts
+        Service-->>Client: InvalidCredentialException(40101)
+    else 验证成功
+        Service->>Repo: mark_login_success
+        Service->>Repo: bump_token_version
+        Service->>Token: issue_access_token + issue_refresh_token
+        Token-->>Service: access / refresh
+        Service-->>Client: TokenResponse
+    end
+```
+
+刷新、登出、改密流程：
+
+- `POST /iam/auth/refresh`：解析 refresh token → 校验 `token_version` → 重新 `bump_token_version` → 签发新 token 对。
+- `POST /iam/auth/logout`：从 `request.state.auth_context` 读 `user_id` → `bump_token_version` → 所有版本号低于新值的 token 立即失效。
+- `POST /iam/auth/password`：校验旧密码 → `update_password_hash` 自动 `+1 token_version` → 签发新 token 对。
+
+启用密码登录或 `auth_mode=jwt` 时必须配置 `security.token.secret`；`SecuritySettings` 在模型层（`model_validator(mode="after")`）即校验该必填关系。
 
 ## 企业组织权限模块
 
@@ -507,8 +563,8 @@ start_time <= 当前时间 <= end_time
 ```mermaid
 flowchart TB
     subgraph FrameworkRBAC["通用租户 RBAC 框架"]
-        IAM["app/iam<br/>租户、成员、角色、权限"]
-        Security["pkg/security<br/>AuthContext 与权限依赖"]
+        IAM["app/iam<br/>租户、成员、角色、权限、登录认证"]
+        Security["pkg/security<br/>AuthContext、TokenService、权限依赖"]
         Tenant["pkg/tenant<br/>租户上下文"]
     end
 
@@ -518,29 +574,31 @@ flowchart TB
     end
 
     API["业务 API"]
+    AuthAPI["/iam/auth<br/>登录、刷新、登出、改密"]
 
     IAM --> Security
     Tenant --> Security
     System --> API
     Workspace --> API
     Security -. 保护 .-> API
+    Security -. 保护 .-> AuthAPI
 ```
 
 ```text
 app/iam + pkg/security + pkg/tenant
   -> 通用租户 RBAC 框架
-  -> 面向请求上下文、租户隔离和权限依赖
+  -> 面向请求上下文、租户隔离、权限依赖、JWT 与密码登录认证
 
 app/system + app/workspace
   -> 企业组织权限和业务资源模型
   -> 面向组织结构、数据权限范围、空间成员和临时授权
 ```
 
-当前 `app/iam` 是统一授权来源：`app.web.create_app()` 基于 `IamAuthContextService` 创建认证依赖，`app/iam`、`app/system`、`app/workspace` 的路由统一挂载该依赖，并通过 `require_tenant()` / `require_permission()` 完成接口级鉴权。`app/system` 的企业角色权限和 `app/workspace` 的空间成员角色暂未映射到 `AuthContext`，属后续演进点。
+当前 `app/iam` 是统一授权来源：`app.web.create_app()` 基于 `IamAuthContextService` 创建认证依赖，`app/iam`、`app/system`、`app/workspace` 的路由统一挂载该依赖，并通过 `require_tenant()` / `require_permission()` 完成接口级鉴权。启用 `enable_password_login` 时还会挂载 `/iam/auth` 子路由，由 `app/iam/auth_routes.py` 提供。`app/system` 的企业角色权限和 `app/workspace` 的空间成员角色暂未映射到 `AuthContext`，属后续演进点。
 
 ## 当前 API 边界
 
-三个路由工厂均已通过 `app.web.register_routes()` 统一注册，统一挂载基于 `IamAuthContextService` 的认证依赖。
+`/system`、`/workspaces`、`/iam` 三个路由工厂均已通过 `app.web.register_routes()` 统一注册，统一挂载基于 `IamAuthContextService` 的认证依赖。当 `security.enable_password_login=true` 时，额外挂载 `/iam/auth` 子路由。
 
 ### `/system`
 
@@ -587,6 +645,17 @@ app/system + app/workspace
 | `POST` | `/iam/tenants/{tenant_id}/members` | 添加租户成员（需要租户上下文和 `tenant:member:add` 权限）。 |
 | `GET` | `/iam/tenants/{tenant_id}/members` | 查询租户成员列表（需要租户上下文和 `tenant:member:read` 权限）。 |
 
+### `/iam/auth`
+
+仅在 `security.enable_password_login=true` 时由 `app.web.register_routes()` 挂载。登录与刷新端点不要求认证；登出与改密要求 `app.web.create_auth_dependency()` 解析出的已认证上下文。
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| `POST` | `/iam/auth/login` | 账号密码登录，签发访问令牌与刷新令牌。 |
+| `POST` | `/iam/auth/refresh` | 使用刷新令牌换取新 token 对，并轮换 `token_version`。 |
+| `POST` | `/iam/auth/logout` | 登出当前用户，使历史 token 全部失效。 |
+| `POST` | `/iam/auth/password` | 修改当前用户密码，并签发新 token 对。 |
+
 ## 已知边界
 
 当前已经具备：
@@ -599,6 +668,10 @@ app/system + app/workspace
 - 企业组织权限数据结构和 API。
 - 业务空间和临时授权 API。
 - 企业权限与空间表结构 SQL 脚本。
+- `AuthMode` 互斥的 HEADER / JWT 解析路径，由 `app.web.create_auth_dependency()` 统一接入。
+- 启用 `enable_password_login` 时挂载 `/iam/auth` 路由，覆盖登录、刷新、登出、改密四个端点。
+- HS256 JWT 签发与解析（`TokenService` / `JwtTokenResolver`，无第三方依赖）。
+- PBKDF2-HMAC-SHA256 密码哈希、失败计数与账号锁定（`PasswordHasher` / `IamUserCredential`）。
 
 当前尚未完整实现：
 
@@ -606,6 +679,7 @@ app/system + app/workspace
 - 临时授权校验作为统一权限依赖兜底策略（授予接口已接入权限码依赖）。
 - 空间成员角色到 `AuthContext.roles` 的自动映射。
 - 权限缓存、审计日志和权限变更失效机制。
+- 非 HS256 算法（如 RS256）、刷新 token 黑名单和登录设备管理。
 
 ## 推荐演进方向
 
