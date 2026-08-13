@@ -17,6 +17,7 @@ from pkg.config.exceptions import (
 )
 from pkg.config.models import (
     AppSettings,
+    AuthMode,
     DatabaseSettings,
     DatabaseType,
     FrozenSettings,
@@ -24,6 +25,8 @@ from pkg.config.models import (
     PoolSettings,
     ProfileSettings,
     RuntimeSettings,
+    SecuritySettings,
+    TokenSettings,
 )
 
 
@@ -290,3 +293,60 @@ def test_frozen_settings_validate_default_values() -> None:
 
     with pytest.raises(ValidationError):
         InvalidDefaultSettings()
+
+
+# ── SecuritySettings / AuthMode ─────────────────────
+
+
+def test_security_settings_default_auth_mode_is_header() -> None:
+    """SecuritySettings 默认 auth_mode 应为 header。"""
+    settings = SecuritySettings()
+
+    assert settings.auth_mode is AuthMode.HEADER
+    assert settings.enable_password_login is False
+
+
+def test_security_settings_accepts_jwt_mode_with_secret() -> None:
+    """auth_mode=jwt 且 secret 非空时应通过校验。"""
+    settings = SecuritySettings(
+        auth_mode=AuthMode.JWT,
+        token=TokenSettings(secret="x" * 32),
+    )
+
+    assert settings.auth_mode is AuthMode.JWT
+
+
+def test_security_settings_rejects_jwt_mode_without_secret() -> None:
+    """auth_mode=jwt 但 secret 为空时应被拒绝。"""
+    with pytest.raises(ValidationError) as exc_info:
+        SecuritySettings(auth_mode=AuthMode.JWT)
+
+    assert "auth_mode=jwt" in str(exc_info.value)
+    assert "security.token.secret" in str(exc_info.value)
+
+
+def test_security_settings_rejects_jwt_mode_with_blank_secret() -> None:
+    """auth_mode=jwt 但 secret 全是空白时应被拒绝。"""
+    with pytest.raises(ValidationError) as exc_info:
+        SecuritySettings(
+            auth_mode=AuthMode.JWT,
+            token=TokenSettings(secret="   "),
+        )
+
+    assert "auth_mode=jwt" in str(exc_info.value)
+
+
+def test_security_settings_header_mode_works_without_secret() -> None:
+    """header 模式（默认）不要求 secret 必填。"""
+    settings = SecuritySettings()
+
+    assert settings.auth_mode is AuthMode.HEADER
+    assert settings.token.secret == ""
+
+
+def test_security_settings_password_login_still_requires_secret() -> None:
+    """启用密码登录时即使 auth_mode=header 也必须配置 secret。"""
+    with pytest.raises(ValidationError) as exc_info:
+        SecuritySettings(enable_password_login=True, auth_mode=AuthMode.HEADER)
+
+    assert "启用密码登录" in str(exc_info.value)

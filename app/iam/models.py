@@ -89,3 +89,36 @@ class IamRolePermission(Base):
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     role_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("iam_roles.id"), nullable=False, index=True)
     permission_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("iam_permissions.id"), nullable=False, index=True)
+
+
+class IamUserCredential(Base):
+    """IAM 用户凭证。
+
+    与 :class:`IamUser` 一一对应，仅持有登录态（密码哈希、失败计数、token 版本号等），
+    不存放任何与租户/角色/权限相关的业务属性。
+
+    字段语义：
+
+    - ``token_version`` 每次登出或重置密码时 +1，所有版本号低于新值的访问 token 立即失效。
+    - ``failed_attempts`` 连续登录失败计数，成功后清零；超过上限后写入 ``locked_until``。
+    """
+
+    __tablename__ = "iam_user_credentials"
+
+    user_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("iam_users.id", ondelete="CASCADE"), primary_key=True
+    )
+    password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
+    token_version: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
+    failed_attempts: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
+    locked_until: Mapped[datetime | None] = mapped_column(DateTime)
+    last_login_at: Mapped[datetime | None] = mapped_column(DateTime)
+    password_changed_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, default=datetime.utcnow
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, default=datetime.utcnow
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow
+    )

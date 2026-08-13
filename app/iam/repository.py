@@ -1,6 +1,8 @@
 """IAM 数据访问。"""
 
-from sqlalchemy import select
+from datetime import datetime
+
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.iam.models import (
@@ -11,6 +13,7 @@ from app.iam.models import (
     IamTenantMember,
     IamTenantMemberRole,
     IamUser,
+    IamUserCredential,
 )
 
 
@@ -26,6 +29,108 @@ class IamRepository:
         """查询启用状态的用户。"""
         result = await self.db.execute(select(IamUser).where(IamUser.id == user_id, IamUser.is_active.is_(True)))
         return result.scalars().first()
+
+    async def get_user_by_username(self, username: str) -> IamUser | None:
+        """按登录账号查询用户（不限启用状态，供登录校验使用）。"""
+        result = await self.db.execute(select(IamUser).where(IamUser.username == username))
+        return result.scalars().first()
+
+    # ── 用户凭证 ──────────────────────────────────────────
+
+    async def get_credential(self, user_id: int) -> IamUserCredential | None:
+        """按用户 ID 查询凭证行。"""
+        result = await self.db.execute(
+            select(IamUserCredential).where(IamUserCredential.user_id == user_id)
+        )
+        return result.scalars().first()
+
+    async def create_credential(
+        self,
+        *,
+        user_id: int,
+        password_hash: str,
+    ) -> IamUserCredential:
+        """为用户初始化凭证行。"""
+        credential = IamUserCredential(
+            user_id=user_id,
+            password_hash=password_hash,
+            token_version=0,
+            failed_attempts=0,
+        )
+        self.db.add(credential)
+        await self.db.flush()
+        return credential
+
+    async def update_password_hash(
+        self,
+        *,
+        user_id: int,
+        new_password_hash: str,
+    ) -> None:
+        """更新密码哈希并将 token_version +1，使历史 token 失效。"""
+        await self.db.execute(
+            update(IamUserCredential)
+            .where(IamUserCredential.user_id == user_id)
+            .values(
+                password_hash=new_password_hash,
+                token_version=IamUserCredential.token_version + 1,
+                failed_attempts=0,
+                locked_until=None,
+                password_changed_at=datetime.utcnow(),
+            )
+        )
+        await self.db.flush()
+
+    async def mark_login_success(self, *, user_id: int) -> None:
+        """登录成功时清零失败计数并刷新 last_login_at。"""
+        await self.db.execute(
+            update(IamUserCredential)
+            .where(IamUserCredential.user_id == user_id)
+            .values(
+                failed_attempts=0,
+                locked_until=None,
+                last_login_at=datetime.utcnow(),
+            )
+        )
+        await self.db.flush()
+
+    async def increment_failed_attempts(
+        self,
+        *,
+        user_id: int,
+        lock_until: datetime | None,
+    ) -> int:
+        """登录失败时累加计数，必要时锁定。返回更新后的失败次数。"""
+        await self.db.execute(
+            update(IamUserCredential)
+            .where(IamUserCredential.user_id == user_id)
+            .values(
+                failed_attempts=IamUserCredential.failed_attempts + 1,
+                locked_until=lock_until,
+            )
+        )
+        await self.db.flush()
+        result = await self.db.execute(
+            select(IamUserCredential.failed_attempts).where(
+                IamUserCredential.user_id == user_id
+            )
+        )
+        return int(result.scalar_one())
+
+    async def bump_token_version(self, *, user_id: int) -> int:
+        """登出或重置密码时使历史 token 全部失效，返回新的 token_version。"""
+        await self.db.execute(
+            update(IamUserCredential)
+            .where(IamUserCredential.user_id == user_id)
+            .values(token_version=IamUserCredential.token_version + 1)
+        )
+        await self.db.flush()
+        result = await self.db.execute(
+            select(IamUserCredential.token_version).where(
+                IamUserCredential.user_id == user_id
+            )
+        )
+        return int(result.scalar_one())
 
     # ── 租户管理 ──────────────────────────────────────────
 

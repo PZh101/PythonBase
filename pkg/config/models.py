@@ -140,6 +140,63 @@ class DatabaseSettings(FrozenSettings):
         return value
 
 
+class PasswordPolicySettings(FrozenSettings):
+    """密码哈希与锁定策略配置。"""
+
+    algorithm: str = "pbkdf2_sha256"
+    iterations: int = Field(default=600_000, ge=1_000)
+    max_failed_attempts: int = Field(default=5, ge=1)
+    lock_duration_seconds: int = Field(default=900, ge=0)
+
+
+class AuthMode(StrEnum):
+    """请求认证模式：决定依赖哪个请求头解析主体。
+
+    - ``HEADER``：从 ``X-User-Id`` / ``X-Tenant-Id`` 头读取，忽略 ``Authorization``。
+    - ``JWT``：从 ``Authorization: Bearer <jwt>`` 头解析，忽略 X- 头。
+    """
+
+    HEADER = "header"
+    JWT = "jwt"
+
+
+class TokenSettings(FrozenSettings):
+    """JWT 签发与生命周期配置。"""
+
+    issuer: str = "pythonbase"
+    secret: str = Field(default="", repr=False)
+    algorithm: str = "HS256"
+    access_token_ttl_seconds: int = Field(default=3600, ge=1)
+    refresh_token_ttl_seconds: int = Field(default=86_400, ge=1)
+    clock_skew_seconds: int = Field(default=30, ge=0)
+
+
+class SecuritySettings(FrozenSettings):
+    """认证安全总配置，聚合密码策略与 token 配置。"""
+
+    password: PasswordPolicySettings = Field(default_factory=PasswordPolicySettings)
+    token: TokenSettings = Field(default_factory=TokenSettings)
+    enable_password_login: bool = False
+    auth_mode: AuthMode = AuthMode.HEADER
+
+    @model_validator(mode="after")
+    def validate_security_requirements(self) -> "SecuritySettings":
+        """校验认证相关字段的互斥与必填关系。
+
+        - 启用密码登录时必须提供 token 签名密钥。
+        - ``auth_mode=jwt`` 时必须提供 token 签名密钥。
+
+        Raises:
+            ValueError: 必填条件未满足。
+        """
+        secret_missing = not self.token.secret.strip()
+        if self.enable_password_login and secret_missing:
+            raise ValueError("启用密码登录时必须配置 security.token.secret")
+        if self.auth_mode is AuthMode.JWT and secret_missing:
+            raise ValueError("auth_mode=jwt 时必须配置 security.token.secret")
+        return self
+
+
 class RuntimeSettings(FrozenSettings):
     """运行时根配置，允许保留业务自定义的顶层配置段。"""
 
@@ -148,3 +205,4 @@ class RuntimeSettings(FrozenSettings):
     app: AppSettings = Field(default_factory=AppSettings)
     database: DatabaseSettings = Field(default_factory=DatabaseSettings)
     logging: LoggingSettings = Field(default_factory=LoggingSettings)
+    security: SecuritySettings = Field(default_factory=SecuritySettings)

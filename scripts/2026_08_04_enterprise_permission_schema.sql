@@ -18,6 +18,20 @@ CREATE TABLE IF NOT EXISTS `iam_users` (
   KEY `idx_iam_users_username` (`username`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='IAM 平台用户表';
 
+CREATE TABLE IF NOT EXISTS `iam_user_credentials` (
+  `user_id` BIGINT NOT NULL COMMENT '用户ID，与 iam_users.id 一一对应',
+  `password_hash` VARCHAR(255) NOT NULL COMMENT '密码哈希，格式 pbkdf2_sha256$<iter>$<salt_hex>$<hash_hex>',
+  `token_version` INT NOT NULL DEFAULT 0 COMMENT '凭证版本号，自增；登出/重置密码时 +1 使历史 token 失效',
+  `failed_attempts` INT NOT NULL DEFAULT 0 COMMENT '连续登录失败次数，成功后清零',
+  `locked_until` DATETIME DEFAULT NULL COMMENT '锁定截止时间，NULL 表示未锁定',
+  `last_login_at` DATETIME DEFAULT NULL COMMENT '最近一次登录成功时间',
+  `password_changed_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '最近一次修改密码时间',
+  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+  `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+  PRIMARY KEY (`user_id`),
+  CONSTRAINT `fk_iam_user_credentials_user_id` FOREIGN KEY (`user_id`) REFERENCES `iam_users` (`id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='IAM 用户凭证表（密码哈希与登录状态）';
+
 CREATE TABLE IF NOT EXISTS `iam_tenants` (
   `id` BIGINT NOT NULL COMMENT '主键ID',
   `code` VARCHAR(64) NOT NULL COMMENT '租户编码',

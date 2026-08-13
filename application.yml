@@ -36,3 +36,29 @@ features:
   allowed_regions:
     - cn-east
     - cn-south
+
+# 认证安全配置：密码登录与 JWT 签发参数。
+# secret 至少 32 字节，生产环境必须通过 APP_SECURITY__TOKEN__SECRET 环境变量覆盖。
+security:
+  # 请求认证模式：严格切换，两种模式互不干扰。
+  #   header（默认）：仅校验 X-User-Id / X-Tenant-Id 头，忽略 Authorization。
+  #                   适用于后台服务互调，由网关/服务网格透传主体。
+  #   jwt            ：仅校验 Authorization: Bearer <jwt>，忽略 X- 头。
+  #                   适用于外部调用（CLI / 第三方 / SPA），必须配置下方 token.secret。
+  auth_mode: header
+  # 是否暴露 /iam/auth/{login,refresh,logout,password} 接口。
+  # 与 auth_mode 互相独立：例如 auth_mode=jwt + enable_password_login=false
+  # 表示只接受外部签发的 token，不暴露登录入口。
+  enable_password_login: true
+  password:
+    algorithm: pbkdf2_sha256
+    iterations: 600000
+    max_failed_attempts: 5
+    lock_duration_seconds: 900
+  token:
+    issuer: pythonbase
+    secret: "change-me-to-a-32-byte-random-string-please"
+    algorithm: HS256
+    access_token_ttl_seconds: 3600
+    refresh_token_ttl_seconds: 86400
+    clock_skew_seconds: 30

@@ -1,28 +1,119 @@
 """FastAPI 安全依赖工厂。"""
-
 from collections.abc import Callable
 from typing import Annotated
 
 from fastapi import Depends, Header, Request
 
+from pkg.config import AuthMode
 from pkg.security.context import AuthContext
-from pkg.security.exceptions import AuthenticationRequiredException
+from pkg.security.exceptions import (
+    AuthenticationRequiredException,
+    InvalidCredentialException,
+    InvalidTokenException,
+)
 from pkg.security.permissions import ensure_any_permission, ensure_permission, ensure_role, ensure_tenant
 from pkg.security.providers import AuthContextProvider
+from pkg.security.token import TokenResolver, extract_bearer_token
 
 
-def create_auth_context_dependency(provider: AuthContextProvider) -> Callable[..., object]:
-    """创建认证上下文依赖。"""
+def extract_principal_from_request(
+    *,
+    auth_mode: AuthMode,
+    authorization: str | None,
+    auth_user_id: int | None,
+    auth_tenant_id: int | None,
+    token_resolver: TokenResolver | None,
+) -> tuple[int, int | None]:
+    """按 ``auth_mode`` 严格从请求中解析出 ``(user_id, tenant_id)``。
+
+    不同模式互不干扰：
+
+    - ``AuthMode.JWT``：只看 ``Authorization: Bearer <token>``，忽略 X- 头；
+      ``token_resolver`` 必须提供，缺失时直接抛 :class:`RuntimeError`。
+    - ``AuthMode.HEADER``：只看 ``X-User-Id`` / ``X-Tenant-Id``，忽略 ``Authorization``。
+
+    Args:
+        auth_mode: 认证模式，决定走哪条解析路径。
+        authorization: ``Authorization`` 头原始内容。
+        auth_user_id: ``X-User-Id`` 头解析出的用户 ID（可为 None）。
+        auth_tenant_id: ``X-Tenant-Id`` 头解析出的租户 ID（可为 None）。
+        token_resolver: Bearer token 解析器；JWT 模式下必填。
+
+    Returns:
+        解析出的 ``(user_id, tenant_id)`` 元组。
+
+    Raises:
+        RuntimeError: ``auth_mode=jwt`` 但未提供 ``token_resolver``。
+        AuthenticationRequiredException: 缺少必要的认证信息。
+        InvalidCredentialException: token 无效（签名错误、过期等）。
+    """
+    if auth_mode is AuthMode.JWT:
+        if token_resolver is None:
+            raise RuntimeError("auth_mode=jwt 但未提供 token_resolver")
+        token = extract_bearer_token(authorization)
+        if token is None:
+            raise AuthenticationRequiredException()
+        try:
+            user_id, tenant_id, _ = token_resolver.resolve(token)
+        except InvalidCredentialException:
+            raise
+        except InvalidTokenException as exc:
+            raise InvalidCredentialException(str(exc.msg)) from exc
+        return user_id, tenant_id
+
+    # AuthMode.HEADER：忽略 Authorization，仅看 X- 头。
+    if auth_user_id is None:
+        raise AuthenticationRequiredException()
+    return auth_user_id, auth_tenant_id
+
+
+def create_auth_context_dependency(
+    provider: AuthContextProvider,
+    *,
+    auth_mode: AuthMode,
+    token_resolver: TokenResolver | None = None,
+) -> Callable[..., object]:
+    """创建认证上下文依赖。
+
+    解析路径由 :class:`AuthMode` **严格** 决定，两种模式互不干扰：
+
+    - ``AuthMode.HEADER``：仅从 ``X-User-Id`` / ``X-Tenant-Id`` 头解析；忽略 ``Authorization``。
+    - ``AuthMode.JWT``：仅从 ``Authorization: Bearer <token>`` 头解析；忽略 X- 头；
+      此时 ``token_resolver`` 必须提供。
+
+    解析失败统一抛出 :class:`AuthenticationRequiredException`
+    （token 非法时会包装为 :class:`InvalidCredentialException`，错误码 40101）。
+
+    Args:
+        provider: 由应用层实现的认证上下文加载协议。
+        auth_mode: 认证模式，决定走哪条解析路径。
+        token_resolver: 仅 ``AuthMode.JWT`` 时需要。
+
+    Returns:
+        返回 :class:`AuthContext` 的 FastAPI 依赖函数。
+
+    Raises:
+        RuntimeError: ``auth_mode=jwt`` 但未提供 ``token_resolver``。
+    """
+    if auth_mode is AuthMode.JWT and token_resolver is None:
+        raise RuntimeError("auth_mode=jwt 但未提供 token_resolver")
 
     async def get_auth_context(
         request: Request,
+        authorization: Annotated[str | None, Header(alias="Authorization")] = None,
         auth_user_id: Annotated[int | None, Header(alias="X-User-Id")] = None,
         auth_tenant_id: Annotated[int | None, Header(alias="X-Tenant-Id")] = None,
     ) -> AuthContext:
-        """从请求头读取用户和租户，并加载认证上下文。"""
-        if auth_user_id is None:
-            raise AuthenticationRequiredException()
-        context = await provider.load_context(user_id=auth_user_id, tenant_id=auth_tenant_id)
+        """从请求头中读取主体并加载认证上下文。"""
+        user_id, tenant_id = extract_principal_from_request(
+            auth_mode=auth_mode,
+            authorization=authorization,
+            auth_user_id=auth_user_id,
+            auth_tenant_id=auth_tenant_id,
+            token_resolver=token_resolver,
+        )
+
+        context = await provider.load_context(user_id=user_id, tenant_id=tenant_id)
         request.state.auth_context = context
         return context
 
@@ -106,7 +197,7 @@ def require_any_permission(*permissions: str) -> Callable[[AuthContext], None]:
     """
 
     def dependency(context: Annotated[AuthContext, Depends(get_current_auth_context)]) -> None:
-        """校验当前请求拥有任意一个指定权限。"""
+        """校验当前请求拥有任意一个权限。"""
         ensure_any_permission(context, *permissions)
 
     return dependency

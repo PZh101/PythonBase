@@ -19,6 +19,13 @@ class InvalidCredentialException(AppException):
         super().__init__(msg, code=code, data=data, http_status_code=401)
 
 
+class InvalidTokenException(AppException):
+    """JWT 解析或签名校验失败。"""
+
+    def __init__(self, msg: str = "token 无效", *, code: int = 40102, data: Any = None):
+        super().__init__(msg, code=code, data=data, http_status_code=401)
+
+
 class TenantRequiredException(AppException):
     """缺少必需的租户上下文。"""
 
