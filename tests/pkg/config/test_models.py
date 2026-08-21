@@ -18,6 +18,9 @@ from pkg.config.exceptions import (
 from pkg.config.models import (
     AppSettings,
     AuthMode,
+    BeatScheduleItem,
+    BeatSettings,
+    CelerySettings,
     DatabaseSettings,
     DatabaseType,
     FrozenSettings,
@@ -249,6 +252,7 @@ def test_runtime_settings_use_default_sections() -> None:
     assert settings.app == AppSettings()
     assert settings.database == DatabaseSettings()
     assert settings.logging == LoggingSettings()
+    assert settings.celery == CelerySettings()
 
 
 def test_logging_level_is_normalized() -> None:

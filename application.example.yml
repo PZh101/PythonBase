@@ -90,3 +90,35 @@ profiles:
         timeout: 30
         recycle: 1800
         pre_ping: true
+
+# Celery 异步任务配置。
+# worker 与 beat 通过 `uv run python celery_worker.py` 独立启动。
+# 本地开发需要先启动 Redis，例如：docker run -d -p 6379:6379 redis:7-alpine。
+celery:
+  # 是否启用 Celery 与 /task-demo 演示路由。
+  enabled: true
+  # broker 与结果后端地址。
+  broker_url: "redis://127.0.0.1:6379/0"
+  result_backend: "redis://127.0.0.1:6379/1"
+  # 定时调度按此时区解释。
+  timezone: "Asia/Shanghai"
+  enable_utc: false
+  # Windows 本地开发会自动回退 solo 池；生产 Linux 建议默认 prefork。
+  worker_pool: null
+  worker_concurrency: null
+  worker_prefetch_multiplier: 1
+  task_acks_late: true
+  task_reject_on_worker_lost: true
+  task_track_started: true
+  task_always_eager: false
+  max_retries: 3
+  retry_backoff: true
+  retry_backoff_max: 600
+  retry_jitter: true
+  # 定时调度：enabled=true 时 worker 进程同时运行 beat。
+  beat:
+    enabled: false
+    schedules:
+      - task: "demo.echo"
+        schedule: "0 3 * * *"
+        args: ["daily-echo"]

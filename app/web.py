@@ -142,6 +142,12 @@ def register_routes(
     app.include_router(create_workspace_router(db_dependency, auth_dependency))
     app.include_router(create_iam_router(db_dependency, auth_dependency))
 
+    if settings.celery.enabled:
+        # 懒导入：仅在启用时加载 Celery 相关模块，避免禁用时 HTTP 进程引入该依赖。
+        from app.task_demo.routes import create_task_demo_router
+
+        app.include_router(create_task_demo_router(auth_dependency))
+
     if settings.security.enable_password_login and token_service is not None:
         app.include_router(
             create_iam_auth_router(

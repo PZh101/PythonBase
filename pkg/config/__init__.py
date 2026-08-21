@@ -15,6 +15,9 @@ from pkg.config.exceptions import (
 from pkg.config.models import (
     AppSettings,
     AuthMode,
+    BeatScheduleItem,
+    BeatSettings,
+    CelerySettings,
     DatabaseSettings,
     DatabaseType,
     FrozenSettings,
@@ -31,6 +34,9 @@ from pkg.config.loader import LoadedConfiguration, deep_merge, load_configuratio
 __all__ = [
     "AppSettings",
     "AuthMode",
+    "BeatScheduleItem",
+    "BeatSettings",
+    "CelerySettings",
     "ConfigAlreadyInitializedError",
     "ConfigEnvironmentError",
     "ConfigError",
