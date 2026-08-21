@@ -320,6 +320,140 @@ APP_LOGGING__BACKTRACE=false
 APP_LOGGING__DIAGNOSE=false
 ```
 
+## 异步任务开发（Celery）
+
+> 想从零加一个业务任务？请直接阅读 [docs/CELERY_EXTENSION.md](CELERY_EXTENSION.md) —— 手把手的任务扩展教程。本节为配置字段与命令参考。
+
+### 启动方式
+
+Celery worker 是独立进程，先启动 Redis，再启动 worker：
+
+```bash
+# 启动 Redis（如已安装可跳过）
+docker run -d -p 6379:6379 redis:7-alpine
+
+# 启动 worker（不启用定时调度）
+uv run python celery_worker.py
+
+# 同时启动 beat 定时调度
+APP_CELERY__BEAT_ENABLED=true uv run python celery_worker.py
+
+# 也可以使用标准 CLI（不注入任务数据库管理器）
+uv run celery -A pkg.celery.app:celery_app worker --loglevel=INFO
+```
+
+注意：Windows 本地开发自动回退 `solo` 池（`prefork` 在 Windows 不可用）；生产 Linux 建议使用默认 `prefork`。
+
+### 配置字段
+
+`CelerySettings`（`celery` 段）字段与对应 Celery conf 键：
+
+| 字段 | 含义 | Celery conf 键 |
+| --- | --- | --- |
+| `enabled` | 是否启用 worker 与 `/task-demo` 路由 | - |
+| `broker_url` | broker 地址（默认 `redis://127.0.0.1:6379/0`） | `broker_url` |
+| `result_backend` | 结果后端地址；为空/`null` 表示禁用 | `result_backend` |
+| `task_serializer` | 任务序列化方式 | `task_serializer` |
+| `timezone` / `enable_utc` | 定时调度时区（默认 `Asia/Shanghai`、关闭 UTC） | `timezone` / `enable_utc` |
+| `worker_pool` / `worker_concurrency` | worker 池与并发数；为空交给 Celery 默认 | `worker_pool` / `worker_concurrency` |
+| `worker_prefetch_multiplier` | 每个进程预取任务数 | `worker_prefetch_multiplier` |
+| `task_acks_late` / `task_reject_on_worker_lost` / `task_track_started` | 任务可靠性开关 | 同名 conf 键 |
+| `task_always_eager` / `task_eager_propagates` / `task_store_eager_result` | eager 模式开关（测试用） | 同名 conf 键 |
+| `max_retries` / `retry_backoff` / `retry_backoff_max` / `retry_jitter` | 默认重试策略 | `task_default_max_retries` / `task_retry_backoff` / `task_retry_backoff_max` / `task_retry_jitter` |
+| `beat` | 定时调度开关与任务表 | `beat_schedule` |
+| `include` | 需要注册的任务模块列表 | `include` |
+
+### 如何编写任务
+
+任务通过进程级 Celery 应用注册，默认注册模块为 `pkg.celery.tasks`：
+
+```python
+from pkg.celery.app import get_celery_app
+
+_celery = get_celery_app()
+
+
+@_celery.task(name="demo.echo")
+def demo_echo(payload: str) -> str:
+    """回显示例任务。"""
+    return f"echo:{payload}"
+```
+
+新增任务模块时，把模块路径追加到 `celery.include`，例如：
+
+```yaml
+celery:
+  include:
+    - pkg.celery.tasks
+    - app.example.tasks
+```
+
+### 重试与退避
+
+任务内使用 `self.retry(countdown=...)` 触发重试，`retry_backoff` 自动按指数退避：
+
+```python
+@_celery.task(
+    name="demo.flaky",
+    bind=True,
+    max_retries=3,
+    retry_backoff=True,
+    retry_backoff_max=600,
+    retry_jitter=True,
+)
+def demo_flaky(self, attempts_until_success: int = 2) -> str:
+    """指数退避重试演示：第 N 次尝试成功。"""
+    attempt = self.request.retries + 1
+    if attempt < attempts_until_success:
+        raise self.retry(countdown=2 ** self.request.retries)
+    return f"success-after-{attempt}-attempts"
+```
+
+### 异步数据库访问
+
+Celery 任务是同步函数，需要通过 `run_async_in_task` 复用任务进程内的 `AsyncDatabaseManager` 执行异步逻辑：
+
+```python
+from pkg.celery.runner import run_async_in_task
+
+
+@_celery.task(name="demo.db.write")
+def demo_db_write() -> None:
+    """在事务边界内执行异步数据库例程。"""
+    async def _write(db: AsyncSession) -> None:
+        await db.execute(text("..."))   # 写操作，结束由 transaction() 提交
+
+    run_async_in_task(_write)
+```
+
+要点：
+
+- 任务数据库管理器由 `celery_worker.py` 启动时装配一次，任务内复用同一 manager。
+- 异步 engine 绑定创建它的事件循环，而 `asyncio.run` 每次新建事件循环，因此每次任务执行后 manager 会释放引擎，下次任务在新循环上重建。
+- `transaction=False` 时走只读 `session()` 边界。
+- 不要从已运行的异步上下文（如 FastAPI 依赖）中调用 `run_async_in_task`。
+
+### 从 FastAPI 投递与读取结果
+
+```python
+async_result = demo_echo.apply_async(args=["hello"])   # 等价于 demo_echo.delay("hello")
+task_id = async_result.id
+
+result = app.AsyncResult(task_id)
+result.state    # PENDING / STARTED / SUCCESS / FAILURE ...
+result.result   # 任务返回值（配置了 result_backend 时可用）
+```
+
+未配置 `result_backend` 时无法查询结果，`/task-demo/result/{task_id}` 会返回业务错误（`eager` 模式下结果保存在进程内，同样不通过结果后端查询）。
+
+### 测试约定
+
+Celery 测试在 eager 模式下运行，不需要真实 Redis：
+
+- `tests/pkg/celery/conftest.py` 提供 `celery_settings`（`task_always_eager=True`）、`celery_app`（测试隔离）与 `task_db_manager`（桩数据库管理器）fixture。
+- 任务直接调用 `.delay()` 返回 `EagerResult`，`result.state` / `result.get()` 即可断言。
+- 重试测试依赖 `task_store_eager_result=True`（eager 下保存重试状态与结果）。
+
 ## 权限与租户开发
 
 通用权限能力位于 `pkg/security`：

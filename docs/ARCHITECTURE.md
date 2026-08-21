@@ -364,6 +364,60 @@ sequenceDiagram
 
 启用密码登录或 `auth_mode=jwt` 时必须配置 `security.token.secret`；`SecuritySettings` 在模型层（`model_validator(mode="after")`）即校验该必填关系。
 
+## 异步任务架构（Celery）
+
+模块路径：`pkg/celery`、`celery_worker.py`、`app/task_demo`
+
+### 架构图
+
+```mermaid
+flowchart LR
+    API["FastAPI /task-demo<br/>投递任务 / 查询结果"]
+    Broker[("Redis broker<br/>redis://127.0.0.1:6379/0")]
+    Worker["Celery worker<br/>celery_worker.py"]
+    DbManager["AsyncDatabaseManager<br/>任务进程内"]
+    DB[("MySQL / PostgreSQL")]
+    Beat["Celery beat<br/>定时调度"]
+    Backend[("Redis result backend<br/>redis://127.0.0.1:6379/1")]
+
+    API -->|apply_async| Broker
+    Worker -->|消费任务| Broker
+    Beat -->|按 cron 投递| Broker
+    Worker --> DbManager
+    DbManager --> DB
+    API -->|AsyncResult| Backend
+    Worker -->|写入结果| Backend
+```
+
+### 模块职责
+
+| 模块 | 职责 |
+| --- | --- |
+| `pkg/celery/app.py` | Celery 应用工厂（`create_celery_app`）与进程级懒加载持有器（`get_celery_app` / `celery_app`）。 |
+| `pkg/celery/deps.py` | 任务进程级数据库管理器注册表（`create_task_db_manager` / `get_task_db_manager`）。 |
+| `pkg/celery/runner.py` | `run_async_in_task`：同步任务内运行异步数据库例程。 |
+| `pkg/celery/tasks.py` | 示例任务：`demo.echo`、`demo.flaky`（重试退避）、`demo.db.write`。 |
+| `celery_worker.py` | worker + beat 独立启动入口。 |
+| `app/task_demo/` | 投递与查询结果演示路由。 |
+
+### 配置流
+
+```text
+load_runtime_settings()  （application.yml + APP_ 环境变量）
+  -> RuntimeSettings.celery  （CelerySettings）
+  -> create_celery_app(settings)
+  -> _build_conf() 映射 Celery conf 键
+  -> _build_beat_schedule() 转换 beat_schedule
+```
+
+### 设计要点
+
+- **HTTP 进程不连接 Redis**：Celery 应用构造是惰性的，broker 连接在 worker 启动或任务投递时才建立；`celery.enabled=false` 时 `/task-demo` 路由不注册。
+- **worker 为独立进程**：`celery_worker.py` 启动时装配任务数据库管理器，与 HTTP 进程的连接池相互独立。
+- **异步 engine 与事件循环**：异步 engine 绑定创建它的事件循环，任务内通过 `asyncio.run` 每次新建循环执行，完成后释放引擎，下次任务在新循环上重建（`pkg/celery/runner.py`）。
+- **重试与退避**：`task_default_max_retries` / `task_retry_backoff` / `task_retry_backoff_max` / `task_retry_jitter` 提供默认策略，任务内 `self.retry(countdown=...)` 显式重试。
+- **测试零 Redis**：eager 模式（`task_always_eager=True`）下任务同步执行并保存在进程内，无需 broker。
+
 ## 企业组织权限模块
 
 模块路径：`app/system`
@@ -672,6 +726,7 @@ app/system + app/workspace
 - 启用 `enable_password_login` 时挂载 `/iam/auth` 路由，覆盖登录、刷新、登出、改密四个端点。
 - HS256 JWT 签发与解析（`TokenService` / `JwtTokenResolver`，无第三方依赖）。
 - PBKDF2-HMAC-SHA256 密码哈希、失败计数与账号锁定（`PasswordHasher` / `IamUserCredential`）。
+- Celery 异步任务与定时调度：`pkg/celery`、`celery_worker.py`、`/task-demo` 演示路由，Redis broker / result backend。
 
 当前尚未完整实现：
 

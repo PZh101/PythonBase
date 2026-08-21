@@ -94,6 +94,19 @@ app = create_app()
 - `iam_user_credentials.failed_attempts` / `locked_until` 实现连续失败锁定，由 `PasswordPolicySettings.max_failed_attempts` / `lock_duration_seconds` 控制。
 - 启用密码登录或 `auth_mode=jwt` 时必须配置 `security.token.secret`。
 
+### 异步任务（Celery）
+
+模块路径：`pkg/celery`、`celery_worker.py`、`app/task_demo`
+
+当 `celery.enabled=true` 时，项目支持 Celery 异步任务与定时调度：
+
+- `pkg/celery/app.py`：Celery 应用工厂与进程级懒加载持有器（`create_celery_app` / `get_celery_app`）。
+- `pkg/celery/tasks.py`：示例任务 `demo.echo`（回显）、`demo.flaky`（指数退避重试）、`demo.db.write`（异步数据库访问）。
+- `celery_worker.py`：worker + beat 独立启动入口，Windows 自动回退 `solo` 池。
+- `app/task_demo`：演示投递与查询结果的路由 `POST /task-demo/enqueue`、`GET /task-demo/result/{task_id}`。
+
+worker 为独立进程，HTTP 服务启动不要求 Redis 在线；测试在 eager 模式下运行，无需真实 broker。
+
 ## 技术栈
 
 - Python >= 3.12
@@ -101,6 +114,7 @@ app = create_app()
 - Pydantic v2：请求、响应和配置模型校验
 - SQLAlchemy 2.x Async：异步 ORM、Engine、Session 和事务管理
 - asyncpg / asyncmy：PostgreSQL / MySQL 异步驱动
+- Celery 5.x（Redis broker / result backend）：异步任务、定时调度、重试退避
 - Loguru：统一应用日志输出
 - PyYAML：环境变量值解析
 - PyJWT（项目自带 HS256 实现，标准库 hmac + hashlib）：访问令牌与刷新令牌签发
@@ -119,6 +133,19 @@ uv run python main.py
 
 # 访问接口文档
 # http://127.0.0.1:8000/docs
+```
+
+异步任务（可选）：先启动 Redis，再运行 worker。
+
+```bash
+# 启动 Redis（如已安装可跳过）
+docker run -d -p 6379:6379 redis:7-alpine
+
+# 启动 Celery worker（独立进程）
+uv run python celery_worker.py
+
+# 同时启用 beat 定时调度
+APP_CELERY__BEAT_ENABLED=true uv run python celery_worker.py
 ```
 
 常用测试命令：
@@ -161,6 +188,13 @@ APP_SECURITY__TOKEN__SECRET=please-replace-with-a-long-random-string
 APP_SECURITY__TOKEN__ACCESS__TOKEN__TTL__SECONDS=3600
 APP_SECURITY__TOKEN__REFRESH__TOKEN__TTL__SECONDS=86400
 APP_SECURITY__PASSWORD__ITERATIONS=600000
+APP_CELERY__ENABLED=false
+APP_CELERY__BROKER_URL=redis://127.0.0.1:6379/0
+APP_CELERY__RESULT_BACKEND=redis://127.0.0.1:6379/1
+APP_CELERY__TIMEZONE=UTC
+APP_CELERY__TASK_ALWAYS_EAGER=true
+APP_CELERY__BEAT_ENABLED=true
+APP_CELERY__BEAT_SCHEDULES=[{"task":"demo.echo","schedule":"0 3 * * *"}]
 ```
 
 配置合并优先级为：`application.yml` 公共配置 < `profiles.<active>` < `application-<active>.yml` < `APP_` 环境变量。环境变量值会优先按 YAML 标量解析，因此可以表达布尔值、数字、列表和字典。
@@ -202,10 +236,12 @@ PythonBase/
 ├── app/                  # 应用业务模块
 │   ├── iam/              # 租户 IAM、AuthContext 加载、账号密码登录
 │   ├── system/           # 企业组织、用户、角色、菜单/API 权限
+│   ├── task_demo/        # Celery 任务投递与结果查询演示
 │   ├── workspace/        # 业务空间、空间成员、临时授权
 │   └── web.py            # FastAPI 应用创建和路由注册
 ├── docs/                 # 项目文档
 ├── pkg/                  # 通用框架能力
+│   ├── celery/           # Celery 应用工厂、任务辅助与示例任务
 │   ├── common/           # BaseSchema、ApiResponse、异常处理
 │   ├── config/           # 配置模型和环境变量解析
 │   ├── database/         # SQLAlchemy Async 基础设施和 CRUD
@@ -213,6 +249,7 @@ PythonBase/
 │   └── tenant/           # 租户上下文、解析器和 TenantMixin
 ├── scripts/              # 数据库和运维脚本
 ├── tests/                # 测试文件
+├── celery_worker.py      # Celery worker + beat 启动入口
 ├── main.py               # HTTP 服务入口
 ├── pyproject.toml        # 项目元数据和依赖
 ├── pytest.ini            # pytest 配置
@@ -247,6 +284,7 @@ class UserResponse(BaseSchema):
 - [开发说明](docs/DEVELOPMENT.md)
 - [架构文档](docs/ARCHITECTURE.md)：包含 Mermaid 总体架构图、启动流程图、请求时序图和权限数据关系图。
 - [测试指南](docs/TEST.md)
+- [Celery 任务扩展指南](docs/CELERY_EXTENSION.md)：如何添加业务任务、定时调度、重试与测试。
 - [权限租户流程](docs/PERMISSION_TENANT_FLOW.md)
 - [当前权限、租户与资源隔离业务逻辑](docs/CURRENT_PERMISSION_TENANT_BUSINESS.md)
 - [用户配置模块设计](docs/superpowers/specs/2026-08-04-user-configuration-design.md)

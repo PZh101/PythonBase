@@ -66,8 +66,14 @@ tests/
 │   │   ├── test_password_hasher.py
 │   │   ├── test_permissions.py
 │   │   └── test_token_service.py
-│   └── tenant/              # pkg/tenant
-│       └── test_resolver.py
+│   ├── tenant/              # pkg/tenant
+│   │   └── test_resolver.py
+│   └── celery/              # pkg/celery 异步任务
+│       ├── conftest.py      # eager 模式 fixture
+│       ├── test_config.py
+│       ├── test_factory.py
+│       ├── test_runner.py
+│       └── test_tasks.py
 └── e2e/
     ├── __init__.py
     └── conftest.py          # E2E 专属 fixture（数据库、TestClient）
@@ -80,6 +86,18 @@ tests/
 - **pytest**：通过 `pyproject.toml` 与 `pytest.ini` 配置
 - **httpx / FastAPI TestClient**：用于 E2E 和 web 层测试
 - 框架层测试大量使用 mock，不需要真实数据库；`tests/pkg/database/test_*.py` 与 `tests/app/**` 中的 service / repository 测试通常使用事务回滚或内存数据库
+
+## Celery 任务测试
+
+Celery 测试位于 `tests/pkg/celery`，在 **eager 模式**下运行，**不需要真实 Redis**。
+
+- `conftest.py` 提供三个 fixture：
+  - `celery_settings`：`task_always_eager=True`、`task_store_eager_result=True`、`task_eager_propagates=False`、`result_backend=None`。
+  - `celery_app`：构建测试 Celery 应用，测试前后重置进程级持有器并重载 `pkg.celery.tasks`。
+  - `task_db_manager`：桩数据库管理器，通过 `calls` 列表断言调用序列。
+- 任务测试直接调用 `.delay()` 返回 `EagerResult`，用 `.get()` / `.state` / `.result` 断言。
+- 重试测试依赖 `task_store_eager_result=True`：eager 下保存重试状态，可断言超过 `max_retries` 后任务 `FAILURE`。
+- `run_async_in_task` 测试通过桩管理器验证 `initialize → transaction/session → dispose` 调用顺序。
 
 ## 编写单元测试规范
 
