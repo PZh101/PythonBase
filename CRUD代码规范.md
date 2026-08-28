@@ -1,5 +1,9 @@
 # PythonBase CRUD 开发规范
 
+> 配套文档：[CRUD 基础代码参考](CRUD基础代码.md)
+>
+> 本文回答“必须遵守什么规则”；配套文档回答 `BaseSchema`、`SafeId`、`ApiResponse`、`PageData`、全局异常、Trace ID、当前用户、数据库会话、CRUD 基类和雪花 ID 等基础代码“是什么、放在哪里、如何实现”。首次阅读应先看配套文档第 1～4 节，再回到本文查看完整约束。
+
 ## 1. 文档说明
 
 ### 1.1 目的
@@ -145,7 +149,11 @@ CREATE TABLE BizCustomer (
 
 ```python
 entity_id = id_generator.next_id()
-customer = Customer(id=entity_id, tenant_id=current_user.tenant_id, ...)
+customer = Customer(
+    id=entity_id,
+    tenant_id=current_user.tenant_id,
+    customer_name=body.customer_name,
+)
 ```
 
 反例：
@@ -247,6 +255,8 @@ updated_at = datetime.utcnow()  # 同一条数据混用两种时间语义
 
 ### 3.2 BaseSchema 和安全类型
 
+完整定义和可运行测试见：[CRUD 基础代码参考 - Pydantic 公共 API 类型](CRUD基础代码.md#2-pydantic-公共-api-类型)。
+
 接口模型不得直接继承 `pydantic.BaseModel`，必须继承 `pkg.common.api.BaseSchema`：
 
 ```python
@@ -275,64 +285,7 @@ class CustomerResponse(BaseSchema):
 - `Field` 用于长度、数值范围、列表数量等边界校验。
 - `Literal` 或 `Enum` 用于排序方向、状态、过滤操作符等有限集合。
 
-`SafeId` 也必须基于 Pydantic 定义：
-
-```python
-from typing import Annotated
-
-from pydantic import BeforeValidator, PlainSerializer, WithJsonSchema
-
-
-SIGNED_BIGINT_MAX = 9_223_372_036_854_775_807
-
-
-def parse_safe_id(value: object) -> int:
-    """只接受有符号 BIGINT 正数范围内的十进制字符串。"""
-    if not isinstance(value, str) or not value.isascii() or not value.isdecimal():
-        raise ValueError("ID 必须是十进制字符串")
-    parsed = int(value)
-    if not 0 < parsed <= SIGNED_BIGINT_MAX:
-        raise ValueError("ID 超出 BIGINT 正数范围")
-    return parsed
-
-
-SAFE_ID_JSON_SCHEMA = {
-    "type": "string",
-    "pattern": "^[0-9]+$",
-    "minLength": 1,
-    "maxLength": 19,
-    "description": "有符号 BIGINT 正数范围内的十进制字符串",
-}
-
-SafeId = Annotated[
-    int,
-    BeforeValidator(parse_safe_id, json_schema_input_type=str),
-    PlainSerializer(lambda value: str(value), return_type=str, when_used="json"),
-    WithJsonSchema(SAFE_ID_JSON_SCHEMA, mode="validation"),
-    WithJsonSchema(SAFE_ID_JSON_SCHEMA, mode="serialization"),
-]
-```
-
-这样生成的 OpenAPI/MCP validation schema 和 serialization schema 都是 `string`，不会诱导客户端发送 JSON Number。响应实体字段继续使用 `SafeBigInt`，请求 ID 使用 `SafeId`。
-
-普通 `BaseSchema` 当前会兼容额外字段。面向写操作的请求应增加严格请求基类，防止伪造的系统字段被静默忽略：
-
-```python
-from pydantic import ConfigDict
-
-
-class BaseRequestSchema(BaseSchema):
-    """禁止未知字段的接口请求基类。"""
-
-    model_config = ConfigDict(
-        alias_generator=BaseSchema.model_config["alias_generator"],
-        populate_by_name=True,
-        serialize_by_alias=True,
-        extra="forbid",
-    )
-```
-
-Create、Get、Update、Delete 和 Page 五类 Request 均应继承 `BaseRequestSchema`。响应模型继续继承 `BaseSchema`。如果项目决定直接把 `extra="forbid"` 加入全局 `BaseSchema`，必须先评估现有接口兼容性。
+`SafeId`、`SafeBigInt`、`SafeDatetime`、`BaseSchema` 和 `BaseRequestSchema` 的唯一目标实现放在配套基础代码文档中，规范文件不再复制实现，避免两份代码漂移。Create、Get、Update、Delete 和 Page 五类 Request 均应继承 `BaseRequestSchema`；响应模型继承 `BaseSchema`。
 
 正例：
 
@@ -474,6 +427,8 @@ X-Idempotency-Key: 32f8d1c0-0b23-4b82-b319-1a9f0ce614d4
 - 相同键、不同请求指纹：返回 HTTP `409`，不得返回不相关的首次结果。
 - 相同键且首次请求仍在处理中：返回明确的“请求处理中”冲突或等待既定短时窗口，不得并发执行两次。
 - 幂等占位记录、业务新增和最终响应记录应在可证明原子的事务方案中完成。使用同一数据库时优先放在同一事务并依赖唯一约束竞争；跨存储实现必须说明锁、租约、失败恢复和过期规则。
+
+`IdempotencyKey`、请求指纹、幂等记录模型、唯一约束抢占和 Create 事务编排的完整代码见：[CRUD 基础代码参考 - Create 幂等基础组件](CRUD基础代码.md#12-create-幂等基础组件)。
 
 反例：
 
@@ -670,24 +625,19 @@ stmt = stmt.order_by(text(f"{body.sort_field} {body.sort_order}"))
 ## 5. 接口模型样例
 
 ```python
-from typing import Annotated, Literal
+from typing import Annotated
 
-from pydantic import Field, WithJsonSchema, field_validator, model_validator
+from pydantic import Field, model_validator
+from pydantic.experimental.missing_sentinel import MISSING
 
 from pkg.common.api import (
     BaseRequestSchema,
     BaseSchema,
+    PageRequest,
     SafeBigInt,
     SafeDatetime,
     SafeId,
 )
-
-
-class SortItem(BaseRequestSchema):
-    """分页排序项。"""
-
-    field: str = Field(min_length=1, max_length=64)
-    direction: Literal["asc", "desc"]
 
 
 class CustomerCreateRequest(BaseRequestSchema):
@@ -705,55 +655,18 @@ class CustomerGetRequest(BaseRequestSchema):
     id: SafeId
 
 
-UPDATE_CUSTOMER_NAME_SCHEMA = {
-    "type": "string",
-    "minLength": 1,
-    "maxLength": 100,
-}
-UPDATE_STATUS_SCHEMA = {
-    "type": "integer",
-    "minimum": 0,
-    "maximum": 1,
-}
-UpdateCustomerName = Annotated[
-    str | None,
-    WithJsonSchema(UPDATE_CUSTOMER_NAME_SCHEMA, mode="validation"),
-]
-UpdateStatus = Annotated[
-    int | None,
-    WithJsonSchema(UPDATE_STATUS_SCHEMA, mode="validation"),
-]
-
-
 class CustomerUpdateRequest(BaseRequestSchema):
     """更新客户请求。"""
 
     id: SafeId
     version: int = Field(ge=1)
-    # 默认 None 表示省略；WithJsonSchema 保证外部契约不声明 null 合法。
-    customer_name: UpdateCustomerName = None
-    description: str | None = Field(default=None, max_length=1000)
-    status: UpdateStatus = None
-
-    @field_validator("customer_name")
-    @classmethod
-    def validate_customer_name(cls, value: str | None) -> str:
-        """校验更新客户名称的长度。"""
-        if value is None:
-            raise ValueError("客户名称不能设置为 null")
-        if not 1 <= len(value) <= 100:
-            raise ValueError("客户名称长度必须在 1 到 100 之间")
-        return value
-
-    @field_validator("status")
-    @classmethod
-    def validate_status(cls, value: int | None) -> int:
-        """校验更新状态。"""
-        if value is None:
-            raise ValueError("状态不能设置为 null")
-        if value not in (0, 1):
-            raise ValueError("状态只能为 0 或 1")
-        return value
+    customer_name: (
+        Annotated[str, Field(min_length=1, max_length=100)] | MISSING
+    ) = MISSING
+    description: (
+        Annotated[str, Field(max_length=1000)] | None | MISSING
+    ) = MISSING
+    status: Annotated[int, Field(ge=0, le=1)] | MISSING = MISSING
 
     @model_validator(mode="after")
     def validate_update_fields(self) -> "CustomerUpdateRequest":
@@ -790,14 +703,10 @@ class CustomerPageFilter(BaseRequestSchema):
         return self
 
 
-class CustomerPageRequest(BaseRequestSchema):
+class CustomerPageRequest(PageRequest[CustomerPageFilter]):
     """客户分页请求。"""
 
-    page: int = Field(default=1, ge=1)
-    page_size: int = Field(default=20, ge=1, le=200)
-    keyword: str | None = Field(default=None, max_length=100)
     filters: CustomerPageFilter = Field(default_factory=CustomerPageFilter)
-    sorts: list[SortItem] = Field(default_factory=list, max_length=3)
 
 
 class CustomerResponse(BaseSchema):
@@ -824,13 +733,15 @@ class CustomerDeleteResponse(BaseSchema):
 
 说明：
 
-- 对数据库非空字段，默认 `None` 仅作为“字段省略”的内部哨兵且默认值不参与校验；`WithJsonSchema(mode="validation")` 让 HTTP 请求和 MCP Tool 输入只声明真实的非空类型，`field_validator` 负责拒绝显式 `null` 并执行运行时边界校验。
-- Update Request 是输入模型，不得作为接口响应模型。Service 提取更新数据必须使用 `model_dump(exclude_unset=True)`；如果测试或内部转发需要序列化请求模型，也必须使用 `exclude_unset=True`，不得依赖其普通 serialization schema 表达省略语义。
-- 对 `description` 等真实可空字段，使用 `str | None`；如果业务需要将其显式更新为 `null`，必须使用 `model_fields_set` 区分“未传字段”和“明确传入 null”，不能简单过滤所有 `None`。
+- Update 字段使用 Pydantic `MISSING` 表示“未传”。数据库非空字段不包含 `None`，因此显式 `null` 会被拒绝；可空字段使用 `T | None | MISSING`，可以区分“清空”和“不更新”。
+- Pydantic 会自动从 Schema 和序列化结果中排除 `MISSING`。完整定义和契约说明见：[CRUD 基础代码参考 - Update 字段的省略哨兵](CRUD基础代码.md#24-update-字段的省略哨兵)。
+- Service 提取更新数据仍必须使用 `model_dump(exclude_unset=True)` 并排除 `id/version`，不能简单过滤所有 `None`，否则会破坏可空字段的清空语义。
 
 ---
 
 ## 6. 数据库连接规范
+
+`DatabaseSettings`、`AsyncDatabaseManager` 和读写 Session 依赖的基础代码见：[CRUD 基础代码参考 - 数据库 Session 依赖](CRUD基础代码.md#9-数据库-session-依赖)。
 
 ### 6.1 配置和密钥
 
@@ -1028,6 +939,8 @@ WHERE id = :id
 
 ## 8. JWT、当前用户和权限规范
 
+`CurrentUser` 与现有 `AuthContext` 的适配代码见：[CRUD 基础代码参考 - 当前用户、租户和权限上下文](CRUD基础代码.md#6-当前用户租户和权限上下文)。
+
 ### 8.1 JWT 传递
 
 统一使用：
@@ -1071,10 +984,10 @@ class CurrentUser:
     username: str | None
     roles: frozenset[str]
     permissions: frozenset[str]
-    token_version: int
 ```
 
 - Route 和 Service 通过依赖注入获取上下文，不得自行解析 JWT。
+- `token_version` 由认证层在生成 `AuthContext` 前完成校验，不作为普通 CRUD 的业务字段继续向下传递。
 - 普通 CRUD 的认证依赖必须要求非空 `tenant_id`；缺少租户上下文时返回明确的 `403`，不得因为 `tenant_id is None` 而省略租户查询条件。
 - `tenant_id`、`created_by`、`updated_by` 必须取自上下文。
 - 请求体出现这些只读字段时应由 Pydantic 禁止额外字段或显式拒绝，不能静默信任。
@@ -1108,6 +1021,8 @@ user_id = body.updated_by
 ---
 
 ## 9. 全局异常处理规范
+
+异常类和 FastAPI 全局处理器的完整代码见：[CRUD 基础代码参考 - 统一异常和全局处理器](CRUD基础代码.md#4-统一异常和全局处理器)。
 
 ### 9.1 异常职责
 
@@ -1167,6 +1082,8 @@ except Exception as exc:
 ---
 
 ## 10. Trace ID 规范
+
+Trace 上下文、中间件和响应头代码见：[CRUD 基础代码参考 - Trace ID 中间件](CRUD基础代码.md#5-trace-id-中间件)。
 
 ### 10.1 生成和传递
 
